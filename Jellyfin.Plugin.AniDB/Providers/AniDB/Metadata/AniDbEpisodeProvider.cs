@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
+using Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
@@ -137,6 +138,48 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
     /// <returns>The special's document, or <c>null</c> when it cannot be identified.</returns>
     private async Task<FileInfo?> FindSpecialXml(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
     {
+        // The list is where a film that the season numbering files among the specials is
+        // recorded. Nothing about AniDB's own specials can turn one up: it is an anime of its
+        // own there, with ordinary episodes.
+        if (info.IndexNumber is { } specialNumber)
+        {
+            var listed = await AniDbAnimeList.ResolveSpecial(
+                _configurationManager.ApplicationPaths,
+                seriesId,
+                specialNumber,
+                _logger,
+                cancellationToken).ConfigureAwait(false);
+
+            if (listed != null)
+            {
+                var listedFolder = await FindSeriesFolder(listed.AnimeId, cancellationToken).ConfigureAwait(false);
+                var listedXml = string.IsNullOrEmpty(listedFolder)
+                    ? null
+                    : GetEpisodeXmlFile(listed.Number, listed.IsSpecial ? "S" : string.Empty, listedFolder);
+
+                if (listedXml?.Exists == true)
+                {
+                    _logger.LogDebug(
+                        "Special {EpisodeNumber} of AniDB series {SeriesId} read from {EpisodeNumberInEntry} of anime {AnimeId}, where the anime list places it",
+                        info.IndexNumber,
+                        seriesId,
+                        listed.Number,
+                        listed.AnimeId);
+
+                    return listedXml;
+                }
+
+                _logger.LogWarning(
+                    "The anime list places special {EpisodeNumber} of AniDB series {SeriesId} at {EpisodeNumberInEntry} of anime {AnimeId}, which holds no such episode. It stays without metadata",
+                    info.IndexNumber,
+                    seriesId,
+                    listed.Number,
+                    listed.AnimeId);
+
+                return null;
+            }
+        }
+
         var chain = await AniDbSeasonResolver.GetCachedSeasonChain(_configurationManager.ApplicationPaths, seriesId, cancellationToken).ConfigureAwait(false);
 
         // Make sure the one entry a single-entry chain has is on disk. The rest of the chain is

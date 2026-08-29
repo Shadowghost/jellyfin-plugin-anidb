@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using Jellyfin.Plugin.AniDB.Providers.AniDB.Identity;
+using Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Library;
 using Microsoft.Extensions.Logging;
@@ -321,6 +322,13 @@ internal static partial class AniDbSeasonResolver
         ILogger logger,
         CancellationToken cancellationToken)
     {
+        var listed = await AniDbAnimeList.ResolveSeason(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
+
+        if (listed != null)
+        {
+            return listed;
+        }
+
         var layout = AniDbSeasonLayout.Read(libraryManager, seriesId);
         var key = seriesId + "|" + (layout?.Signature ?? "-");
 
