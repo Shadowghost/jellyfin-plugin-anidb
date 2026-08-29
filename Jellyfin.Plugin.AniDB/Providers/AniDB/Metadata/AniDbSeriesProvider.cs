@@ -309,7 +309,20 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
 
         if (string.IsNullOrEmpty(animeId) && !string.IsNullOrEmpty(info.Name))
         {
-            animeId = await Equals_check.XmlFindId(info.Name, cancellationToken).ConfigureAwait(false);
+            animeId = await Equals_check.XmlFindId(info.Name, GetLookupYear(info), cancellationToken).ConfigureAwait(false);
+
+            if (string.IsNullOrEmpty(animeId))
+            {
+                Logger?.LogInformation(
+                    "No AniDB entry could be identified for {SeriesName}. Where two shows share a name, the year in the folder name is what tells them apart",
+                    info.Name);
+            }
+            else
+            {
+                // Only a name match is walked back. An id set by hand names the entry to
+                // use, and the season provider asks for a season's own entry by id.
+                animeId = await AniDbSeasonResolver.ResolveFirstSeasonId(_appPaths, animeId, info.Name, Logger, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         if (!string.IsNullOrEmpty(animeId))
@@ -1145,6 +1158,15 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
 
         return person;
     }
+
+    /// <summary>
+    /// The year a lookup should be pinned to, taken from whichever of the item's own year and
+    /// its air date is set.
+    /// </summary>
+    /// <param name="info">The lookup info.</param>
+    /// <returns>The year, or <c>null</c> when nothing gives one.</returns>
+    private static int? GetLookupYear(ItemLookupInfo info)
+        => info.Year ?? info.PremiereDate?.Year;
 
     /// <summary>
     /// Reverses the order of the parts of a name.

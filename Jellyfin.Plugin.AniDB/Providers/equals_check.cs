@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -128,17 +129,49 @@ internal static partial class Equals_check
     /// Finds an AniDB ID for name.
     /// </summary>
     /// <param name="name">The name to search for.</param>
+    /// <param name="year">The year the series is known to be from, used to tell apart two shows of the same name.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <param name="x_">The current attempt; the titles file is downloaded once when it cannot be read.</param>
     /// <returns>A <see cref="Task"/> representing the asynchronous operation, containing the best matching AniDB ID.</returns>
-    public static async Task<string> XmlFindId(string name, CancellationToken cancellationToken, int x_ = 0)
+    public static async Task<string> XmlFindId(string name, int? year, CancellationToken cancellationToken, int x_ = 0)
     {
-        // Read the titles file once and reuse it for both the search and the comparison
-        // below; it is several megabytes, and this used to read it twice per lookup.
+        // Read once and reuse for both the search and the comparison below; the file is
+        // several megabytes.
         string? xml = await ReadTitlesXml(x_, cancellationToken).ConfigureAwait(false);
         if (xml is null)
         {
             return string.Empty;
+        }
+
+        var strippedName = StripYearRegex().Replace(name, string.Empty).Trim();
+
+        // Index every entry once with a constant pattern rather than compiling a fresh regex
+        // per candidate id. The first entry for an id wins.
+        var entriesById = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Match entry in AnimeEntryRegex().Matches(xml))
+        {
+            entriesById.TryAdd(entry.Groups[1].Value, entry.Groups[2].Value);
+        }
+
+        // A title AniDB spells as the library does settles the question, and settles it without
+        // the fuzzy search, which reduces a name to its first few letters and so returns every
+        // show whose name begins alike.
+        //
+        // The name is tried with the year first. Two shows made years apart under one name are
+        // told apart by nothing else, and AniDB gives the later one a title carrying its year,
+        // which is what this matches. The year is put back because the scanner has already
+        // taken it out of the name and into its own field. Each spelling is tried as written
+        // before being reduced to its letters and digits, so that a title differing only in
+        // punctuation - a sequel marked with an apostrophe, say - cannot take the original's
+        // place.
+        foreach (var (candidate, loose) in GetNameCandidates(name, strippedName, year))
+        {
+            var matches = FindByTitle(entriesById, candidate, loose);
+
+            if (matches.Count == 1)
+            {
+                return matches[0];
+            }
         }
 
         var results = SearchTitlesXml(xml, name);
@@ -150,15 +183,6 @@ internal static partial class Equals_check
 
         int lowestDistance = Plugin.Instance.Configuration.TitleSimilarityThreshold;
         string currentId = string.Empty;
-
-        // Index every entry once with a constant pattern, rather than building and compiling a
-        // fresh regex per candidate id inside the loop. Keep the first entry for an id so the
-        // behaviour matches the previous "first match wins" lookup.
-        var entriesById = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (Match entry in AnimeEntryRegex().Matches(xml))
-        {
-            entriesById.TryAdd(entry.Groups[1].Value, entry.Groups[2].Value);
-        }
 
         foreach (string id in results)
         {
@@ -177,7 +201,11 @@ internal static partial class Equals_check
 
                 if (!string.IsNullOrEmpty(nameFromId))
                 {
-                    int stringDistance = LevenshteinDistance(name, nameFromId);
+                    // Compared without the year, which AniDB writes into a title only where it
+                    // has to. Leaving it in counts every one of its characters as a difference,
+                    // which is enough to lose the right entry to a longer name that happens to
+                    // carry digits.
+                    int stringDistance = LevenshteinDistance(strippedName, nameFromId);
                     if (lowestDistance > stringDistance)
                     {
                         lowestDistance = stringDistance;
@@ -188,6 +216,113 @@ internal static partial class Equals_check
         }
 
         return currentId;
+    }
+
+    /// <summary>
+    /// The spellings of a name to look for, in the order they settle a match. A spelling
+    /// carrying the year comes before one without, and an exact spelling before a reduced one.
+    /// </summary>
+    /// <param name="name">The name as the library holds it.</param>
+    /// <param name="strippedName">The same name with any trailing year removed.</param>
+    /// <param name="year">The year the series is known to be from.</param>
+    /// <returns>Each spelling, and whether to compare it reduced to letters and digits.</returns>
+    private static IEnumerable<(string Candidate, bool Loose)> GetNameCandidates(string name, string strippedName, int? year)
+    {
+        var withYear = year.HasValue
+            ? FormattableString.Invariant($"{strippedName} ({year.Value})")
+            : null;
+
+        foreach (var loose in new[] { false, true })
+        {
+            if (withYear != null)
+            {
+                yield return (withYear, loose);
+            }
+
+            if (!string.Equals(name, withYear, StringComparison.Ordinal))
+            {
+                yield return (name, loose);
+            }
+
+            if (!string.Equals(strippedName, name, StringComparison.Ordinal)
+                && !string.Equals(strippedName, withYear, StringComparison.Ordinal))
+            {
+                yield return (strippedName, loose);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The ids of every entry AniDB gives the given title to, matched whole rather than fuzzily.
+    /// </summary>
+    /// <param name="entriesById">Every entry of the titles file, by AniDB id.</param>
+    /// <param name="name">The name to look for.</param>
+    /// <param name="loose">Whether to compare the names reduced to their letters and digits, rather than as written.</param>
+    /// <returns>The matching AniDB ids.</returns>
+    private static List<string> FindByTitle(IReadOnlyDictionary<string, string> entriesById, string name, bool loose)
+    {
+        var matches = new List<string>();
+        var wanted = NormalizeTitle(name, loose);
+
+        if (wanted.Length == 0)
+        {
+            return matches;
+        }
+
+        foreach (var entry in entriesById)
+        {
+            foreach (Match title in TitleRegex().Matches(entry.Value))
+            {
+                if (string.Equals(NormalizeTitle(title.Groups[1].Value, loose), wanted, StringComparison.Ordinal))
+                {
+                    matches.Add(entry.Key);
+
+                    break;
+                }
+            }
+        }
+
+        return matches;
+    }
+
+    /// <summary>
+    /// Reduces a title for comparison. Case and runs of whitespace never distinguish two
+    /// spellings of a name; punctuation is dropped only when asked, because an apostrophe or a
+    /// full stop is sometimes the whole difference between a show and its sequel. A year is
+    /// always kept: it is what tells a remake from the show it is named after.
+    /// </summary>
+    /// <param name="value">The title to reduce.</param>
+    /// <param name="loose">Whether to drop everything that is not a letter or a digit.</param>
+    /// <returns>The reduced title.</returns>
+    private static string NormalizeTitle(string value, bool loose)
+    {
+        var builder = new StringBuilder(value.Length);
+        var pendingSpace = false;
+
+        foreach (var character in value)
+        {
+            if (char.IsWhiteSpace(character))
+            {
+                pendingSpace = builder.Length > 0;
+
+                continue;
+            }
+
+            if (loose && !char.IsLetterOrDigit(character))
+            {
+                continue;
+            }
+
+            if (pendingSpace && !loose)
+            {
+                builder.Append(' ');
+            }
+
+            pendingSpace = false;
+            builder.Append(char.ToUpperInvariant(character));
+        }
+
+        return builder.ToString();
     }
 
     /// <summary>
@@ -316,10 +451,10 @@ internal static partial class Equals_check
     [GeneratedRegex(@"s\b")]
     private static partial Regex SAtEndBoundaryRegex();
 
-    [GeneratedRegex(@"<title.*>([^<]+)</title>")]
+    [GeneratedRegex(@"<title[^>]*>([^<]+)</title>")]
     private static partial Regex TitleRegex();
 
-    [GeneratedRegex(@" \([0-9]{4}\)$")]
+    [GeneratedRegex(@"\s*\([0-9]{4}\)\s*$")]
     private static partial Regex StripYearRegex();
 
     [GeneratedRegex(@"<anime aid=""([0-9]+)""((?s).*?)</anime>")]
