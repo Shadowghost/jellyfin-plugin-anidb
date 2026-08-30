@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -50,6 +51,25 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     // instead, measured with the monotonic clock so a system time change cannot shorten it.
     private static readonly TimeSpan _minimumDelay = TimeSpan.FromMilliseconds(1);
     private static readonly SemaphoreSlim _requestGate = new(1, 1);
+
+    /// <summary>
+    /// How long an id AniDB has refused is left alone before it is asked for again. Long
+    /// enough that a scan does not keep paying for the same refusal, short enough that an
+    /// entry restored on AniDB's side is picked up the same day.
+    /// </summary>
+    private static readonly TimeSpan _retryAfterRefusal = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// One gate per anime, so that the episodes of a season refreshing together send one
+    /// request for the entry they share rather than one apiece.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _downloadGates = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The ids AniDB has refused, and what it said. Kept because a refusal caches nothing, so
+    /// without it every episode of the show asks again and pays for the same answer.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, (DateTime At, string Message)> _refusedIds = new(StringComparer.Ordinal);
 
     // A ban is temporary, but its remaining time cannot be queried and runs from 15 minutes
     // to 24 hours. Probing a banned server extends the ban, so double the backoff after each
@@ -555,26 +575,87 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     /// <returns>The path to the series data file.</returns>
     public static async Task<string> GetSeriesData(IApplicationPaths appPaths, string seriesId, CancellationToken cancellationToken)
     {
-        var dataPath = GetSeriesDataPath(appPaths, seriesId);
-        var seriesDataPath = Path.Combine(dataPath, "series.xml");
-        var fileInfo = new FileInfo(seriesDataPath);
+        var seriesDataPath = Path.Combine(GetSeriesDataPath(appPaths, seriesId), "series.xml");
 
-        var isEmpty = fileInfo.Exists && fileInfo.Length == 0;
-        var isStale = fileInfo.Exists && DateTime.UtcNow - fileInfo.LastWriteTimeUtc > TimeSpan.FromDays(Plugin.Instance.Configuration.MaxCacheAge);
-
-        if (!fileInfo.Exists || isEmpty || isStale)
+        if (!NeedsDownload(seriesDataPath))
         {
-            // While banned, read the stale copy rather than spend a request that would only
-            // be refused and lengthen the ban.
-            if (fileInfo.Exists && !isEmpty && GetRemainingBanTime() > TimeSpan.Zero)
+            return seriesDataPath;
+        }
+
+        // One download per anime at a time. Every episode of a season asks for the entry it is
+        // read from, and a scan refreshes them together, so without this they all find nothing
+        // cached and send the same request at once - one per episode, for one anime.
+        var gate = _downloadGates.GetOrAdd(seriesId, _ => new SemaphoreSlim(1, 1));
+
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            // Whoever held the gate has very likely just downloaded it.
+            if (!NeedsDownload(seriesDataPath))
             {
                 return seriesDataPath;
             }
 
-            await DownloadSeriesData(seriesId, seriesDataPath, appPaths.CachePath, cancellationToken).ConfigureAwait(false);
+            var fileInfo = new FileInfo(seriesDataPath);
+            var hasCopy = fileInfo.Exists && fileInfo.Length > 0;
+
+            // While banned, read the stale copy rather than spend a request that would only
+            // be refused and lengthen the ban.
+            if (hasCopy && GetRemainingBanTime() > TimeSpan.Zero)
+            {
+                return seriesDataPath;
+            }
+
+            // AniDB refuses some ids outright - one it has deleted or merged away, or one set
+            // by hand that was never right - and answers with an error there is nothing to
+            // cache. Nothing being cached is what makes the next episode ask again, so one bad
+            // id costs a request for every file in the show, every scan. The refusal is
+            // remembered instead, and raised again without asking.
+            if (_refusedIds.TryGetValue(seriesId, out var refusal) && DateTime.UtcNow - refusal.At < _retryAfterRefusal)
+            {
+                throw new InvalidOperationException(refusal.Message);
+            }
+
+            try
+            {
+                await DownloadSeriesData(seriesId, seriesDataPath, appPaths.CachePath, cancellationToken).ConfigureAwait(false);
+
+                _refusedIds.TryRemove(seriesId, out _);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _refusedIds[seriesId] = (DateTime.UtcNow, ex.Message);
+
+                Logger?.LogWarning(
+                    "AniDB refused anime {AnimeId}: {Error}. Nothing more will be asked of that id for {RetryAfter}, so the rest of the show does not spend a request each on the same refusal",
+                    seriesId,
+                    ex.Message,
+                    _retryAfterRefusal);
+
+                throw;
+            }
+        }
+        finally
+        {
+            gate.Release();
         }
 
         return seriesDataPath;
+    }
+
+    /// <summary>
+    /// Whether the cached document of an anime has to be downloaded before it can be read.
+    /// </summary>
+    /// <param name="seriesDataPath">The path of the cached document.</param>
+    /// <returns><c>true</c> when there is no usable copy on disk.</returns>
+    private static bool NeedsDownload(string seriesDataPath)
+    {
+        var fileInfo = new FileInfo(seriesDataPath);
+
+        return !fileInfo.Exists
+            || fileInfo.Length == 0
+            || DateTime.UtcNow - fileInfo.LastWriteTimeUtc > TimeSpan.FromDays(Plugin.Instance.Configuration.MaxCacheAge);
     }
 
     /// <summary>
