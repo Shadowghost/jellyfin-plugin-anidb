@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -14,6 +15,18 @@ namespace Jellyfin.Plugin.AniDB.Providers;
 /// </summary>
 internal static partial class Equals_check
 {
+    /// <summary>
+    /// How far apart two short names may be and still be the same show. Below this, the
+    /// proportional bar would demand a near-exact spelling of a name too short to afford one.
+    /// </summary>
+    private const int MinimumTitleDistance = 3;
+
+    /// <summary>
+    /// How many of the closest matches to offer when none of them clears the bar, so that a
+    /// name AniDB spells quite differently still turns something up to choose from.
+    /// </summary>
+    private const int FallbackSearchResults = 3;
+
     /// <summary>
     /// Cut p(%) away from the string.
     /// </summary>
@@ -88,41 +101,55 @@ internal static partial class Equals_check
     }
 
     /// <summary>
-    /// simple regex.
-    /// </summary>
-    /// <param name="regex">The regex to match with.</param>
-    /// <param name="input">The input to match against.</param>
-    /// <param name="group">The capture group to return.</param>
-    /// <param name="matchInt">The index of the match to return.</param>
-    /// <returns>The captured value, or an empty string when there is no match.</returns>
-    public static string OneLineRegex(Regex regex, string input, int group = 1, int matchInt = 0)
-    {
-        int x = 0;
-        foreach (Match match in regex.Matches(input))
-        {
-            if (x == matchInt)
-            {
-                return match.Groups[group].Value;
-            }
-
-            x++;
-        }
-
-        return string.Empty;
-    }
-
-    /// <summary>
-    /// Searches for possible AniDB IDs for name.
+    /// Searches for possible AniDB IDs for name, closest spelling first.
     /// </summary>
     /// <param name="name">The name to search for.</param>
+    /// <param name="limit">How many ids to return at most.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <param name="x_">The current attempt; the titles file is downloaded once when it cannot be read.</param>
     /// <returns>A <see cref="Task"/> representing the asynchronous operation, containing the matching AniDB IDs.</returns>
-    public static async Task<List<string>> XmlSearch(string name, CancellationToken cancellationToken, int x_ = 0)
+    public static async Task<List<string>> XmlSearch(string name, int limit, CancellationToken cancellationToken, int x_ = 0)
     {
         string? xml = await ReadTitlesXml(x_, cancellationToken).ConfigureAwait(false);
 
-        return xml is null ? [] : SearchTitlesXml(xml, name);
+        if (xml is null)
+        {
+            return [];
+        }
+
+        var results = SearchTitlesXml(xml, name);
+
+        if (results.Count == 0)
+        {
+            return results;
+        }
+
+        // The fuzzy search cuts a name to its first few letters and then makes even those
+        // optional, so a short name matches every show that merely starts alike: "Oshi no Ko"
+        // returns 78 of them, only three of which are the show. Each id handed back costs the
+        // caller an AniDB request, so they are ordered by how close their closest title really
+        // is and cut down to the ones that could be spellings of the same name.
+        var entriesById = IndexEntries(xml);
+        var strippedName = StripYearRegex().Replace(name, string.Empty).Trim();
+
+        var ranked = results
+            .Distinct(StringComparer.Ordinal)
+            .Select(id => (Id: id, Distance: entriesById.TryGetValue(id, out var entry) ? BestDistance(entry, strippedName) : int.MaxValue))
+            .OrderBy(candidate => candidate.Distance)
+            .ToList();
+
+        // Half a name may differ before it stops being a spelling of the same title. A short
+        // name gets a floor under that, because three letters out of six is still the same
+        // show once romanisation has had its way with it.
+        var bar = Math.Max(MinimumTitleDistance, strippedName.Length / 2);
+        var withinBar = ranked.Where(candidate => candidate.Distance <= bar).ToList();
+
+        // Nothing within the bar means the library spells this name quite unlike AniDB does.
+        // The closest few are still the best answer there is, and an empty identify dialog is
+        // no answer at all.
+        var chosen = withinBar.Count > 0 ? withinBar : ranked.Take(FallbackSearchResults);
+
+        return [.. chosen.Take(limit).Select(candidate => candidate.Id)];
     }
 
     /// <summary>
@@ -145,13 +172,7 @@ internal static partial class Equals_check
 
         var strippedName = StripYearRegex().Replace(name, string.Empty).Trim();
 
-        // Index every entry once with a constant pattern rather than compiling a fresh regex
-        // per candidate id. The first entry for an id wins.
-        var entriesById = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (Match entry in AnimeEntryRegex().Matches(xml))
-        {
-            entriesById.TryAdd(entry.Groups[1].Value, entry.Groups[2].Value);
-        }
+        var entriesById = IndexEntries(xml);
 
         // A title AniDB spells as the library does settles the question, and settles it without
         // the fuzzy search, which reduces a name to its first few letters and so returns every
@@ -191,31 +212,61 @@ internal static partial class Equals_check
                 continue;
             }
 
-            string[] lines = nameXmlFromId.Split(
-                ["\r\n", "\r", "\n"],
-                StringSplitOptions.None);
+            int stringDistance = BestDistance(nameXmlFromId, strippedName);
 
-            foreach (string line in lines)
+            if (lowestDistance > stringDistance)
             {
-                string nameFromId = OneLineRegex(TitleRegex(), line);
-
-                if (!string.IsNullOrEmpty(nameFromId))
-                {
-                    // Compared without the year, which AniDB writes into a title only where it
-                    // has to. Leaving it in counts every one of its characters as a difference,
-                    // which is enough to lose the right entry to a longer name that happens to
-                    // carry digits.
-                    int stringDistance = LevenshteinDistance(strippedName, nameFromId);
-                    if (lowestDistance > stringDistance)
-                    {
-                        lowestDistance = stringDistance;
-                        currentId = id;
-                    }
-                }
+                lowestDistance = stringDistance;
+                currentId = id;
             }
         }
 
         return currentId;
+    }
+
+    /// <summary>
+    /// Every entry of the titles file, by AniDB id. Indexed once with a constant pattern
+    /// rather than by compiling a fresh regex per candidate id; the first entry for an id
+    /// wins.
+    /// </summary>
+    /// <param name="xml">The titles file.</param>
+    /// <returns>The entries, by AniDB id.</returns>
+    private static Dictionary<string, string> IndexEntries(string xml)
+    {
+        var entriesById = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (Match entry in AnimeEntryRegex().Matches(xml))
+        {
+            entriesById.TryAdd(entry.Groups[1].Value, entry.Groups[2].Value);
+        }
+
+        return entriesById;
+    }
+
+    /// <summary>
+    /// How far the closest of an entry's titles is from the given name. Compared without the
+    /// year, which AniDB writes into a title only where it has to. Leaving it in counts every
+    /// one of its characters as a difference, which is enough to lose the right entry to a
+    /// longer name that happens to carry digits.
+    /// </summary>
+    /// <param name="entryXml">The entry, as the titles file holds it.</param>
+    /// <param name="strippedName">The name to compare against, with any trailing year removed.</param>
+    /// <returns>The smallest edit distance across the entry's titles.</returns>
+    private static int BestDistance(string entryXml, string strippedName)
+    {
+        var lowest = int.MaxValue;
+
+        foreach (Match title in TitleRegex().Matches(entryXml))
+        {
+            var titleText = title.Groups[1].Value;
+
+            if (!string.IsNullOrEmpty(titleText))
+            {
+                lowest = Math.Min(lowest, LevenshteinDistance(strippedName, titleText));
+            }
+        }
+
+        return lowest;
     }
 
     /// <summary>

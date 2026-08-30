@@ -44,6 +44,14 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     /// </summary>
     private const string PersonImageBaseUrl = "https://cdn.anidb.net/images/main/";
 
+    /// <summary>
+    /// How many name matches an identify offers. Each one costs an AniDB request, paced
+    /// seconds apart, and the fuzzy search behind them returns every show whose name merely
+    /// begins alike - 78 of them for "Oshi no Ko". Without a cap one identify of a commonly
+    /// named show spends dozens of requests and is enough on its own to earn a ban.
+    /// </summary>
+    private const int MaxSearchResults = 10;
+
     // AniDB bans a client that sends requests closer together than 2500ms, which is the
     // floor the configured interval is clamped to. A bucket limiter cannot express this: it
     // replenishes independently of when tokens are consumed, so an idle plugin holding a full
@@ -483,55 +491,46 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     public async Task<IEnumerable<RemoteSearchResult>> GetSearchResults(SeriesInfo searchInfo, CancellationToken cancellationToken)
     {
         var results = new List<RemoteSearchResult>();
-        var animeId = searchInfo.ProviderIds.GetValueOrDefault(ProviderNames.AniDb);
+        var offered = new HashSet<string>(StringComparer.Ordinal);
+        var imageProvider = new AniDbImageProvider(_appPaths);
 
-        if (!string.IsNullOrEmpty(animeId))
+        async Task Offer(string? id)
         {
-            var resultMetadata = await GetMetadataForId(animeId, searchInfo, cancellationToken).ConfigureAwait(false);
-
-            if (resultMetadata.HasMetadata)
+            if (string.IsNullOrEmpty(id) || !offered.Add(id))
             {
-                var imageProvider = new AniDbImageProvider(_appPaths);
-                var images = await imageProvider.GetImages(animeId, cancellationToken).ConfigureAwait(false);
-                results.Add(MetadataToRemoteSearchResult(resultMetadata, images));
+                return;
+            }
+
+            var metadata = await GetMetadataForId(id, searchInfo, cancellationToken).ConfigureAwait(false);
+
+            if (metadata.HasMetadata)
+            {
+                // Read from the document the line above has just cached, so this costs no
+                // request of its own.
+                var images = await imageProvider.GetImages(id, cancellationToken).ConfigureAwait(false);
+
+                results.Add(MetadataToRemoteSearchResult(metadata, images));
             }
         }
+
+        await Offer(searchInfo.ProviderIds.GetValueOrDefault(ProviderNames.AniDb)).ConfigureAwait(false);
+
+        // The anime list is the one source here that answers with a certainty rather than a
+        // guess, so its answer goes first. It also settles the question the name cannot: it
+        // holds anime only, so a TVDB id it does not carry belongs to something that is not an
+        // anime - a live action adaptation sharing the show's name, most often - and a TVDB id
+        // it does carry names the AniDB entry outright.
+        await Offer(await AniDbAnimeList.ResolveSeriesId(
+            _appPaths,
+            searchInfo.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tvdb)),
+            Logger ?? (ILogger)NullLogger.Instance,
+            cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(searchInfo.Name))
         {
-            List<RemoteSearchResult> name_results = await GetSearchResultsByName(searchInfo.Name, searchInfo, cancellationToken).ConfigureAwait(false);
-
-            foreach (var media in name_results)
+            foreach (var id in await Equals_check.XmlSearch(searchInfo.Name, MaxSearchResults, cancellationToken).ConfigureAwait(false))
             {
-                results.Add(media);
-            }
-        }
-
-        return results;
-    }
-
-    /// <summary>
-    /// Searches AniDB for series matching the given name.
-    /// </summary>
-    /// <param name="name">The name to search for.</param>
-    /// <param name="searchInfo">The series lookup info.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The search results.</returns>
-    public async Task<List<RemoteSearchResult>> GetSearchResultsByName(string name, SeriesInfo searchInfo, CancellationToken cancellationToken)
-    {
-        var imageProvider = new AniDbImageProvider(_appPaths);
-        var results = new List<RemoteSearchResult>();
-
-        List<string> ids = await Equals_check.XmlSearch(name, cancellationToken).ConfigureAwait(false);
-
-        foreach (string id in ids)
-        {
-            var resultMetadata = await GetMetadataForId(id, searchInfo, cancellationToken).ConfigureAwait(false);
-
-            if (resultMetadata.HasMetadata)
-            {
-                var images = await imageProvider.GetImages(id, cancellationToken).ConfigureAwait(false);
-                results.Add(MetadataToRemoteSearchResult(resultMetadata, images));
+                await Offer(id).ConfigureAwait(false);
             }
         }
 
