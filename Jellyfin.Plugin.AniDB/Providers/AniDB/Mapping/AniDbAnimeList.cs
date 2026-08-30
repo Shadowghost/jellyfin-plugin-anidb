@@ -155,6 +155,52 @@ internal static class AniDbAnimeList
     }
 
     /// <summary>
+    /// The entry a show begins in, given an entry of it that the list files as a later season.
+    /// AniDB titles a second season "&lt;name&gt; (&lt;year&gt;)" as readily as it titles a
+    /// remake that way, so a name match on a show whose seasons all aired in one year lands on
+    /// the sequel rather than on the show. The list records which season each entry fills, so
+    /// it can walk that back without asking AniDB anything.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="animeId">The AniDB id the name match produced.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The AniDB id the show begins at, or <c>null</c> where the list does not place the entry or already places it at the show's first season.</returns>
+    public static async Task<string?> ResolveFirstSeason(
+        IApplicationPaths appPaths,
+        string animeId,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(animeId))
+        {
+            return null;
+        }
+
+        await Load(appPaths, logger, cancellationToken).ConfigureAwait(false);
+
+        // Only an entry the list files as a second season or later is walked back. An entry it
+        // already files at season 1 is the show's own start, and moving it could only hand the
+        // show to whatever else shares its TVDB id: the list groups a handful of unrelated
+        // shows under one id, and two adaptations of one book sit that way under season 1.
+        if (_byAnimeId == null || _bySeries == null
+            || !_byAnimeId.TryGetValue(animeId, out var self)
+            || SeasonOf(self) <= 1)
+        {
+            return null;
+        }
+
+        if (!_bySeries.TryGetValue(self.SeriesKey, out var siblings))
+        {
+            return null;
+        }
+
+        var first = PickFirstSeason(siblings);
+
+        return string.Equals(first, animeId, StringComparison.Ordinal) ? null : first;
+    }
+
+    /// <summary>
     /// Which of the entries filed under one show the show begins in.
     /// </summary>
     /// <param name="siblings">Every entry the list files under the same show.</param>

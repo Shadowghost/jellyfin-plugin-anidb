@@ -404,9 +404,36 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
         }
 
         // Only a name match is walked back. An id set by hand names the entry to use, the
-        // anime list already answers with the show's first entry, and the season provider
-        // asks for a season's own entry by id.
-        return await AniDbSeasonResolver.ResolveFirstSeasonId(_appPaths, matched, info.Name ?? folderName, Logger, cancellationToken).ConfigureAwait(false);
+        // TVDB route already answers with the show's first entry, and the season provider asks
+        // for a season's own entry by id.
+        var searchedName = info.Name ?? folderName;
+
+        // The list is asked before AniDB's own relations are walked. A name match lands on a
+        // later season more often than it looks: AniDB disambiguates a second season by
+        // appending its year, exactly as it does a remake, so a show whose seasons all aired in
+        // one year matches its own sequel. The list records which season every entry fills, so
+        // it settles this for nothing, where each hop of the relation walk costs a request.
+        if (!AniDbSeasonResolver.NamesASeason(searchedName))
+        {
+            var listedFirst = await AniDbAnimeList.ResolveFirstSeason(
+                _appPaths,
+                matched,
+                Logger ?? (ILogger)NullLogger.Instance,
+                cancellationToken).ConfigureAwait(false);
+
+            if (!string.IsNullOrEmpty(listedFirst))
+            {
+                Logger?.LogInformation(
+                    "{SeriesName} matched AniDB anime {MatchedId}, which the anime list files as a later season. The show begins at anime {AnimeId}, which is used instead",
+                    searchedName,
+                    matched,
+                    listedFirst);
+
+                return listedFirst;
+            }
+        }
+
+        return await AniDbSeasonResolver.ResolveFirstSeasonId(_appPaths, matched, searchedName, Logger, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
