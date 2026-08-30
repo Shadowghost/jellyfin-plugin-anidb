@@ -21,6 +21,8 @@
                         .anidbStatusState { font-weight: 600; }
                         .anidbStatusState-ok { color: #55a655; }
                         .anidbStatusState-banned { color: #cb272a; }
+                        /* Grows with what is typed into it, rather than scrolling a fixed four rows. */
+                        .anidbTextarea { width: 100%; box-sizing: border-box; font-size: 1rem; line-height: 1.4375em; field-sizing: content; min-height: 8em; }
                     </style>
 
                     <div class="anidbNotice">
@@ -126,7 +128,7 @@
                         </div>
                         <div class="inputContainer">
                             <label class="inputeLabel inputLabelUnfocused" for="txtTagBlacklist">Tag Blacklist</label>
-                            <textarea id="txtTagBlacklist" name="txtTagBlacklist" is="emby-textarea" class="emby-textarea" rows="4"></textarea>
+                            <textarea id="txtTagBlacklist" name="txtTagBlacklist" is="emby-textarea" class="emby-textarea anidbTextarea" rows="4"></textarea>
                             <div class="fieldDescription">Tag names never to import, one per line or separated by commas. Matched whole and without regard to case, against the name AniDB uses.</div>
                         </div>
                         <div class="checkboxContainer checkboxContainer-withDescription">
