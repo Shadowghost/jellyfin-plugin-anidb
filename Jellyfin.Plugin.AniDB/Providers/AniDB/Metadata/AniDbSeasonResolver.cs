@@ -553,6 +553,15 @@ internal static partial class AniDbSeasonResolver
     }
 
     /// <summary>
+    /// Whether a name is asking for one season of a show rather than for the show itself, as a
+    /// folder named "Show Season 2" is.
+    /// </summary>
+    /// <param name="name">The name the series was searched under.</param>
+    /// <returns><c>true</c> when the name ends in a season marker.</returns>
+    public static bool NamesASeason(string? name)
+        => SeasonMarkerRegex().IsMatch(name ?? string.Empty);
+
+    /// <summary>
     /// Walks a name match back to the first season of the show it belongs to.
     /// </summary>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
@@ -569,7 +578,7 @@ internal static partial class AniDbSeasonResolver
         CancellationToken cancellationToken)
     {
         // A folder that names a season is asking for that season, not for the show.
-        if (string.IsNullOrEmpty(animeId) || SeasonMarkerRegex().IsMatch(seriesName ?? string.Empty))
+        if (string.IsNullOrEmpty(animeId) || NamesASeason(seriesName))
         {
             return animeId;
         }

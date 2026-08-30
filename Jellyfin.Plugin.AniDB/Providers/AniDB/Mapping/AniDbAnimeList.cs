@@ -121,6 +121,81 @@ internal static class AniDbAnimeList
     }
 
     /// <summary>
+    /// The AniDB entry a show begins in, found from the TVDB id another provider has already
+    /// settled on. The list keys its entries by TVDB id, so this identifies a show outright
+    /// where matching on the name cannot: where AniDB spells the name differently, and where
+    /// two shows share one name and only the id tells them apart.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="tvdbId">The TVDB id of the series.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The AniDB id, or <c>null</c> when the list files nothing under that TVDB id.</returns>
+    public static async Task<string?> ResolveSeriesId(
+        IApplicationPaths appPaths,
+        string? tvdbId,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        // Anything else is a placeholder the list uses for a show TVDB does not carry, and
+        // those are not keys of the index below.
+        if (string.IsNullOrEmpty(tvdbId) || !tvdbId.All(char.IsAsciiDigit))
+        {
+            return null;
+        }
+
+        await Load(appPaths, logger, cancellationToken).ConfigureAwait(false);
+
+        if (_bySeries == null || !_bySeries.TryGetValue(tvdbId, out var siblings))
+        {
+            return null;
+        }
+
+        return PickFirstSeason(siblings);
+    }
+
+    /// <summary>
+    /// Which of the entries filed under one show the show begins in.
+    /// </summary>
+    /// <param name="siblings">Every entry the list files under the same show.</param>
+    /// <returns>The AniDB id of the earliest entry, or <c>null</c> when none of them fills a season.</returns>
+    private static string? PickFirstSeason(IReadOnlyList<AniDbAnimeListEntry> siblings)
+    {
+        // The show begins in the entry filling its earliest season, and where that season was
+        // released in parts, in the part starting at its first episode. Where a season is
+        // filled by several entries starting together - a show and the recap or alternate
+        // version filed beside it - the oldest of them is the show itself, AniDB having
+        // registered it before whatever was made from it.
+        //
+        // Season 0 is an entry holding nothing but specials, which is never where a show
+        // begins, and a season that will not parse is one the list cannot place at all.
+        return siblings
+            .Select(entry => (Entry: entry, Season: SeasonOf(entry)))
+            .Where(candidate => candidate.Season >= 1)
+            .OrderBy(candidate => candidate.Season)
+            .ThenBy(candidate => candidate.Entry.EpisodeOffset)
+            .ThenBy(candidate => int.TryParse(candidate.Entry.AnimeId, CultureInfo.InvariantCulture, out var id) ? id : int.MaxValue)
+            .Select(candidate => candidate.Entry.AnimeId)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// The season an entry fills, as a number. An entry numbered straight through the whole
+    /// show carries "a" rather than a season, and covers that show from its first episode.
+    /// </summary>
+    /// <param name="entry">The entry.</param>
+    /// <returns>The season number, or -1 where the entry names no season this can read.</returns>
+    private static int SeasonOf(AniDbAnimeListEntry entry)
+    {
+        if (string.Equals(entry.DefaultSeason, "a", StringComparison.OrdinalIgnoreCase))
+        {
+            return 1;
+        }
+
+        return int.TryParse(entry.DefaultSeason, CultureInfo.InvariantCulture, out var parsed) ? parsed : -1;
+    }
+
+    /// <summary>
     /// Works out which of a series' AniDB entries fill the given season, and which of their
     /// episodes each one contributes.
     /// </summary>

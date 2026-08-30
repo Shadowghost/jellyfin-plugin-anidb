@@ -15,12 +15,15 @@ using System.Xml.Serialization;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.AniDB.Configuration;
 using Jellyfin.Plugin.AniDB.Providers.AniDB.Identity;
+using Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Providers;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Jellyfin.Plugin.AniDB.Providers.AniDB.Metadata;
 
@@ -315,22 +318,9 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     {
         var animeId = info.ProviderIds.GetValueOrDefault(ProviderNames.AniDb);
 
-        if (string.IsNullOrEmpty(animeId) && !string.IsNullOrEmpty(info.Name))
+        if (string.IsNullOrEmpty(animeId))
         {
-            animeId = await Equals_check.XmlFindId(info.Name, GetLookupYear(info), cancellationToken).ConfigureAwait(false);
-
-            if (string.IsNullOrEmpty(animeId))
-            {
-                Logger?.LogInformation(
-                    "No AniDB entry could be identified for {SeriesName}. Where two shows share a name, the year in the folder name is what tells them apart",
-                    info.Name);
-            }
-            else
-            {
-                // Only a name match is walked back. An id set by hand names the entry to
-                // use, and the season provider asks for a season's own entry by id.
-                animeId = await AniDbSeasonResolver.ResolveFirstSeasonId(_appPaths, animeId, info.Name, Logger, cancellationToken).ConfigureAwait(false);
-            }
+            animeId = await Identify(info, cancellationToken).ConfigureAwait(false);
         }
 
         if (!string.IsNullOrEmpty(animeId))
@@ -339,6 +329,64 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
         }
 
         return new MetadataResult<Series>();
+    }
+
+    /// <summary>
+    /// Works out which AniDB entry a show is, from whatever the library already knows of it.
+    /// </summary>
+    /// <param name="info">The series lookup info.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The AniDB id, or <c>null</c> when the show cannot be identified.</returns>
+    private async Task<string?> Identify(SeriesInfo info, CancellationToken cancellationToken)
+    {
+        // A TVDB id a provider ahead of this one has already settled on names the show
+        // outright, and the anime list records which AniDB entry that id is. It is tried
+        // first because a name is the weaker evidence of the two: AniDB spells a great many
+        // names differently from TVDB, and where two shows do share a name the id is the only
+        // thing that tells them apart. A folder naming a season is left to the name match
+        // below, because the id names the whole show and would answer with its first season.
+        var tvdbId = info.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tvdb));
+
+        if (!AniDbSeasonResolver.NamesASeason(info.Name))
+        {
+            var listed = await AniDbAnimeList.ResolveSeriesId(
+                _appPaths,
+                tvdbId,
+                Logger ?? (ILogger)NullLogger.Instance,
+                cancellationToken).ConfigureAwait(false);
+
+            if (!string.IsNullOrEmpty(listed))
+            {
+                Logger?.LogInformation(
+                    "{SeriesName} is AniDB anime {AnimeId}, which the anime list files under TVDB series {TvdbId}",
+                    info.Name,
+                    listed,
+                    tvdbId);
+
+                return listed;
+            }
+        }
+
+        if (string.IsNullOrEmpty(info.Name))
+        {
+            return null;
+        }
+
+        var matched = await Equals_check.XmlFindId(info.Name, GetLookupYear(info), cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrEmpty(matched))
+        {
+            Logger?.LogInformation(
+                "No AniDB entry could be identified for {SeriesName}. Where two shows share a name, the year in the folder name is what tells them apart, and a TVDB id on the show lets the anime list answer instead",
+                info.Name);
+
+            return null;
+        }
+
+        // Only a name match is walked back. An id set by hand names the entry to use, the
+        // anime list already answers with the show's first entry, and the season provider
+        // asks for a season's own entry by id.
+        return await AniDbSeasonResolver.ResolveFirstSeasonId(_appPaths, matched, info.Name, Logger, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
