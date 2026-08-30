@@ -1221,9 +1221,18 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
             throw new InvalidOperationException("AniDB API error " + errorRegexMatch.Value);
         }
 
+        // An empty body is how the API turns a request away once it has stopped answering, so
+        // it counts as a ban. Treating it as a one-off failure would let a scan carry on
+        // asking, which is what turns a short refusal into a ban measured in days.
         if (string.IsNullOrWhiteSpace(text))
         {
-            throw new InvalidOperationException("AniDB returned an empty response for anime " + aid);
+            var retryAfter = RegisterBan();
+
+            throw new AniDbBannedException(
+                string.Format(CultureInfo.InvariantCulture, "AniDB returned an empty response for anime {0}; pausing all AniDB requests for {1}.", aid, retryAfter))
+            {
+                RetryAfter = retryAfter
+            };
         }
 
         RegisterSuccess();
