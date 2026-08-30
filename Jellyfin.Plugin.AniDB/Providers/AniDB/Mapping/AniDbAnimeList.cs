@@ -124,11 +124,26 @@ internal static class AniDbAnimeList
             return null;
         }
 
-        // A segment with no count has to come last, or it would swallow the one after it.
+        // A segment with no count has to come last among those starting together, or it would
+        // swallow the one after it.
         var segments = claims
             .OrderBy(segment => segment.FirstEpisodeNumber)
             .ThenBy(segment => segment.EpisodeCount == 0 ? 1 : 0)
             .ToList();
+
+        // An entry only runs to the end of the season if no other entry starts later in it. A
+        // season released in parts is one entry per part, each saying where it starts and none
+        // of them how long it is, so without this the first part would answer for the whole
+        // season and every episode past it would be looked up in the entry before its own.
+        for (var index = 0; index < segments.Count - 1; index++)
+        {
+            var room = segments[index + 1].FirstEpisodeNumber - segments[index].FirstEpisodeNumber;
+
+            if (segments[index].EpisodeCount == 0 && room > 0)
+            {
+                segments[index] = segments[index] with { EpisodeCount = room };
+            }
+        }
 
         logger.LogInformation(
             "The anime list places season {SeasonNumber} of AniDB series {SeriesId} in {Placement}",
