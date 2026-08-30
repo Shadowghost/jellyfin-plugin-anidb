@@ -86,13 +86,17 @@ internal static class AniDbAnimeList
                 if (mapping.TvdbSeason != seasonNumber
                     || mapping.AnidbSeason == 0
                     || mapping.Start is not { } start
-                    || mapping.End is not { } end
-                    || end < start)
+                    || mapping.End < start)
                 {
                     continue;
                 }
 
-                claims.Add(new AniDbSeasonSegment(entry.AnimeId, start + mapping.Offset, end - start + 1, start));
+                // A rule with no end runs to the end of the entry. That is how the list places
+                // the season now airing, whose last episode nobody knows yet, and dropping such
+                // a rule left that season with no placement at all.
+                var count = mapping.End is { } end ? end - start + 1 : 0;
+
+                claims.Add(new AniDbSeasonSegment(entry.AnimeId, start + mapping.Offset, count, start));
                 placed = true;
             }
 
@@ -177,11 +181,11 @@ internal static class AniDbAnimeList
                     }
                 }
 
-                if (mapping.Start is { } start && mapping.End is { } end)
+                if (mapping.Start is { } start)
                 {
                     var number = episodeNumber - mapping.Offset;
 
-                    if (number >= start && number <= end)
+                    if (number >= start && number <= (mapping.End ?? int.MaxValue))
                     {
                         return new AniDbAnimeListEpisode(entry.AnimeId, number, mapping.AnidbSeason == 0);
                     }
