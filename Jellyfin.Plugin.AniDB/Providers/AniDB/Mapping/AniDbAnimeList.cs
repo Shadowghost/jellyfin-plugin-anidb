@@ -35,16 +35,32 @@ internal static class AniDbAnimeList
     /// </summary>
     private static readonly TimeSpan _retryAfterFailure = TimeSpan.FromHours(1);
 
+    /// <summary>
+    /// How long the copy in memory is used before the cached file is looked at again. Reading
+    /// the file's timestamp is cheap, but a scan asks once per episode, and the file only
+    /// changes when this class downloads it or someone replaces it by hand.
+    /// </summary>
+    private static readonly TimeSpan _recheckInterval = TimeSpan.FromMinutes(5);
+
     private static readonly SemaphoreSlim _loadGate = new(1, 1);
 
     /// <summary>
-    /// The parsed list, held for as long as the server runs. Every lookup is answered from
-    /// here: the file is read and parsed once, and downloaded only when the copy on disk is
-    /// missing or has gone stale.
+    /// The parsed list. Every lookup is answered from here: the file is read and parsed once,
+    /// downloaded only when the copy on disk is missing or has gone stale, and read again once
+    /// the copy in memory has.
     /// </summary>
     private static IReadOnlyDictionary<string, AniDbAnimeListEntry>? _byAnimeId;
     private static IReadOnlyDictionary<string, IReadOnlyList<AniDbAnimeListEntry>>? _bySeries;
     private static DateTime _failedAtUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// When the cached file was last compared against the copy in memory, and the timestamp
+    /// that copy was read from. A server left running for weeks would otherwise keep what it
+    /// read at startup for as long as it ran, never learning where the season that started
+    /// since belongs, nor noticing a file replaced underneath it.
+    /// </summary>
+    private static DateTime _checkedAtUtc = DateTime.MinValue;
+    private static DateTime _sourceWrittenAtUtc = DateTime.MinValue;
 
     /// <summary>
     /// The placement worked out for every season already asked about, keyed by series id and
@@ -299,8 +315,8 @@ internal static class AniDbAnimeList
 
     private static async Task Load(IApplicationPaths appPaths, ILogger logger, CancellationToken cancellationToken)
     {
-        // The common path, taken once per lookup: the list is already in memory.
-        if (_byAnimeId != null || DateTime.UtcNow - _failedAtUtc < _retryAfterFailure)
+        // The common path, taken once per lookup: the list is already in memory and current.
+        if (IsCurrent())
         {
             return;
         }
@@ -309,7 +325,7 @@ internal static class AniDbAnimeList
 
         try
         {
-            if (_byAnimeId != null || DateTime.UtcNow - _failedAtUtc < _retryAfterFailure)
+            if (IsCurrent())
             {
                 return;
             }
@@ -323,6 +339,16 @@ internal static class AniDbAnimeList
             if (!file.Exists || file.Length == 0)
             {
                 _failedAtUtc = DateTime.UtcNow;
+
+                return;
+            }
+
+            // The file is the copy of record. Where it is the one already parsed there is
+            // nothing to do; where it is not - downloaded just now, or replaced by hand - what
+            // is in memory is out of date whatever its own age.
+            if (_byAnimeId != null && file.LastWriteTimeUtc == _sourceWrittenAtUtc)
+            {
+                _checkedAtUtc = DateTime.UtcNow;
 
                 return;
             }
@@ -351,6 +377,20 @@ internal static class AniDbAnimeList
         {
             _loadGate.Release();
         }
+    }
+
+    /// <summary>
+    /// Whether a lookup may be answered from what is in memory, either because the cached file
+    /// was checked against it recently enough or because reading it failed recently enough to
+    /// be worth a pause.
+    /// </summary>
+    /// <returns><c>true</c> when the cached file need not be looked at.</returns>
+    private static bool IsCurrent()
+    {
+        var now = DateTime.UtcNow;
+
+        return now - _failedAtUtc < _retryAfterFailure
+            || (_byAnimeId != null && now - _checkedAtUtc < _recheckInterval);
     }
 
     /// <summary>
@@ -470,12 +510,15 @@ internal static class AniDbAnimeList
 
         // Placements worked out from the previous copy belong to it, not to this one.
         _placements = new ConcurrentDictionary<string, IReadOnlyList<AniDbSeasonSegment>>(StringComparer.Ordinal);
+        _checkedAtUtc = DateTime.UtcNow;
+        _sourceWrittenAtUtc = cachedAtUtc;
 
         logger.LogInformation(
-            "The anime list cached on {CachedAt} places {EntryCount} AniDB entries across {SeriesCount} shows. It is read once and kept in memory, and downloaded again after {MaxAgeDays} days",
+            "The anime list cached on {CachedAt} places {EntryCount} AniDB entries across {SeriesCount} shows. It is kept in memory, compared against the cached file every {RecheckMinutes} minutes and downloaded again once that file is {MaxAgeDays} days old",
             cachedAtUtc,
             byAnimeId.Count,
             bySeries.Count,
+            _recheckInterval.TotalMinutes,
             MaxAgeDays);
     }
 
