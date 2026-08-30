@@ -394,6 +394,33 @@ internal static class AniDbAnimeList
     }
 
     /// <summary>
+    /// What is known of the list, for the status the configuration page shows. Reads nothing
+    /// but the timestamp of the cached file, so it costs little to ask often.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <returns>When the cached copy was downloaded, how many entries have been read from it, and how many days a copy is used for.</returns>
+    internal static (DateTime? CachedAtUtc, int EntryCount, int MaxAgeInDays) GetStatus(IApplicationPaths appPaths)
+    {
+        DateTime? cachedAtUtc = null;
+
+        try
+        {
+            var file = new FileInfo(Path.Combine(AniDbTitleDownloader.GetDataPath(appPaths), "anime-list.xml"));
+
+            if (file.Exists && file.Length > 0)
+            {
+                cachedAtUtc = file.LastWriteTimeUtc;
+            }
+        }
+        catch (IOException)
+        {
+            // The status is worth less than the page it is shown on.
+        }
+
+        return (cachedAtUtc, _byAnimeId?.Count ?? 0, MaxAgeDays);
+    }
+
+    /// <summary>
     /// Downloads the list if the copy on disk is missing or has gone stale. A copy that is
     /// merely stale is kept when the download fails: an old mapping for a show already in the
     /// library is almost always still the right one, and is certainly better than none.

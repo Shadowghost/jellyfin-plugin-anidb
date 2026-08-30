@@ -9,6 +9,37 @@
         <div id="animeConfigurationPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
             <div data-role="content">
                 <div class="content-primary">
+                    <style>
+                        .anidbNotice { border-left: 0.25em solid #cb272a; padding: 0.6em 1em; margin: 0 0 1.5em 0; background: rgba(203, 39, 42, 0.08); }
+                        .anidbNotice h3 { margin: 0 0 0.4em 0; }
+                        .anidbNotice p { margin: 0.4em 0; }
+                        .anidbStatus { border: 0.075em solid rgba(127, 127, 127, 0.4); border-radius: 0.25em; padding: 0.6em 1em; margin: 0 0 1.5em 0; }
+                        .anidbStatus h3 { margin: 0 0 0.5em 0; }
+                        .anidbStatusLine { display: flex; align-items: baseline; margin: 0.25em 0; }
+                        .anidbStatusLine dt { flex: 0 0 16em; opacity: 0.7; }
+                        .anidbStatusLine dd { margin: 0; }
+                        .anidbStatusState { font-weight: 600; }
+                        .anidbStatusState-ok { color: #55a655; }
+                        .anidbStatusState-banned { color: #cb272a; }
+                    </style>
+
+                    <div class="anidbNotice">
+                        <h3>AniDB bans servers that ask too often</h3>
+                        <p>AniDB allows one request every few seconds from an IP address and bans one that goes past that, for anything from 15 minutes to a day. The ban is on your address, not on this plugin, so it also stops anything else on the same connection from reaching AniDB.</p>
+                        <p>The first scan of a library is where this is most likely: it asks about every show at once. The plugin paces its requests, waits a ban out rather than retrying into it, and keeps using what it has already cached, so a ban costs you missing metadata for a while rather than anything permanent - refresh those items once it has lifted. It is worth scanning a handful of shows first and letting the rest follow.</p>
+                        <p>Do not lower <em>Maximum Cache Age</em> or <em>Request Interval</em> below their defaults, and raise the interval if anything else on this address talks to AniDB. If a scan seems to have stalled, check the status below before restarting anything: restarting does not clear a ban.</p>
+                    </div>
+
+                    <div class="anidbStatus">
+                        <h3>Status</h3>
+                        <dl id="anidbStatusBody">
+                            <div class="anidbStatusLine"><dt>AniDB</dt><dd id="anidbState">Loading...</dd></div>
+                            <div class="anidbStatusLine"><dt>Requests waiting</dt><dd id="anidbQueued">-</dd></div>
+                            <div class="anidbStatusLine"><dt>Requests sent since start</dt><dd id="anidbSent">-</dd></div>
+                            <div class="anidbStatusLine"><dt>Anime list</dt><dd id="anidbAnimeList">-</dd></div>
+                        </dl>
+                    </div>
+
                     <form id="animeConfigurationForm">
                         <div class="selectContainer">
                             <label class="selectLabel" for="titleLanguage">Title Language</label>
@@ -141,6 +172,61 @@
             <script type="text/javascript">
                 var AniDBConfigurationPage = {
                     pluginUniqueId: "a2b2a7ed-aa28-4521-a64a-63d86901f246",
+                    statusTimer: null,
+
+                    formatDuration: function (seconds) {
+                        var total = Math.max(0, Math.round(seconds));
+
+                        if (total < 60) {
+                            return total + ' seconds';
+                        }
+
+                        if (total < 3600) {
+                            return Math.round(total / 60) + ' minutes';
+                        }
+
+                        return (total / 3600).toFixed(1) + ' hours';
+                    },
+
+                    formatDate: function (value) {
+                        return value ? new Date(value).toLocaleString() : 'never';
+                    },
+
+                    renderStatus: function (status) {
+                        var state = document.getElementById('anidbState');
+
+                        if (status.IsBanned) {
+                            state.className = 'anidbStatusState anidbStatusState-banned';
+                            state.textContent = 'Paused - AniDB is refusing requests. Waiting '
+                                + AniDBConfigurationPage.formatDuration(status.BanRemainingSeconds)
+                                + ' before trying again. Cached metadata is still used in the meantime.';
+                        } else {
+                            state.className = 'anidbStatusState anidbStatusState-ok';
+                            state.textContent = 'Answering requests, one every '
+                                + (status.RequestIntervalMs / 1000).toFixed(1) + ' seconds.';
+                        }
+
+                        document.getElementById('anidbQueued').textContent = status.QueuedRequests === 0
+                            ? 'none'
+                            : status.QueuedRequests + ' waiting, next in '
+                                + AniDBConfigurationPage.formatDuration(status.NextRequestInSeconds);
+
+                        document.getElementById('anidbSent').textContent = status.RequestsSent
+                            + ' (last ' + AniDBConfigurationPage.formatDate(status.LastRequestUtc) + ')';
+
+                        document.getElementById('anidbAnimeList').textContent = status.AnimeListCachedAtUtc
+                            ? 'downloaded ' + AniDBConfigurationPage.formatDate(status.AnimeListCachedAtUtc)
+                                + ', ' + status.AnimeListEntryCount + ' entries read, downloaded again once '
+                                + status.AnimeListMaxAgeDays + ' days old'
+                            : 'not downloaded yet';
+                    },
+
+                    refreshStatus: function () {
+                        ApiClient.getJSON(ApiClient.getUrl('AniDB/Status'))
+                            .then(AniDBConfigurationPage.renderStatus, function () {
+                                document.getElementById('anidbState').textContent = 'Unavailable. Restart the server if the plugin was just installed or updated.';
+                            });
+                    },
 
                     loadConfiguration: function () {
                         Dashboard.showLoadingMsg();
@@ -201,6 +287,13 @@
 
                 document.getElementById('animeConfigurationPage').addEventListener('pageshow', function () {
                     AniDBConfigurationPage.loadConfiguration();
+                    AniDBConfigurationPage.refreshStatus();
+                    AniDBConfigurationPage.statusTimer = setInterval(AniDBConfigurationPage.refreshStatus, 5000);
+                });
+
+                document.getElementById('animeConfigurationPage').addEventListener('pagehide', function () {
+                    clearInterval(AniDBConfigurationPage.statusTimer);
+                    AniDBConfigurationPage.statusTimer = null;
                 });
 
                 document.getElementById('animeConfigurationForm').addEventListener('submit', function (e) {
