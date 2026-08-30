@@ -367,18 +367,38 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
             }
         }
 
-        if (string.IsNullOrEmpty(info.Name))
-        {
-            return null;
-        }
+        var matched = string.IsNullOrEmpty(info.Name)
+            ? string.Empty
+            : await Equals_check.XmlFindId(info.Name, GetLookupYear(info), cancellationToken).ConfigureAwait(false);
 
-        var matched = await Equals_check.XmlFindId(info.Name, GetLookupYear(info), cancellationToken).ConfigureAwait(false);
+        // The name searched above is the item's, which is whatever provider reached it first,
+        // and a provider that matched the wrong show has already renamed it to that show. The
+        // folder is what the user named and still says which show this is, so it gets an
+        // attempt of its own, under the year written into it rather than the wrong show's.
+        var folderName = Path.GetFileName(info.Path?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+
+        if (string.IsNullOrEmpty(matched)
+            && !string.IsNullOrEmpty(folderName)
+            && !string.Equals(folderName, info.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            matched = await Equals_check.XmlFindId(folderName, YearInName(folderName) ?? GetLookupYear(info), cancellationToken).ConfigureAwait(false);
+
+            if (!string.IsNullOrEmpty(matched))
+            {
+                Logger?.LogInformation(
+                    "{SeriesName} could not be matched under that name, but its folder {FolderName} is AniDB anime {AnimeId}. The name on the item is another provider's, and that provider matched a different show",
+                    info.Name,
+                    folderName,
+                    matched);
+            }
+        }
 
         if (string.IsNullOrEmpty(matched))
         {
             Logger?.LogInformation(
-                "No AniDB entry could be identified for {SeriesName}. Where two shows share a name, the year in the folder name is what tells them apart, and a TVDB id on the show lets the anime list answer instead",
-                info.Name);
+                "No AniDB entry could be identified for {SeriesName} (folder {FolderName}). Where two shows share a name, the year in the folder name is what tells them apart, and a TVDB id on the show lets the anime list answer instead",
+                info.Name,
+                folderName);
 
             return null;
         }
@@ -386,7 +406,7 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
         // Only a name match is walked back. An id set by hand names the entry to use, the
         // anime list already answers with the show's first entry, and the season provider
         // asks for a season's own entry by id.
-        return await AniDbSeasonResolver.ResolveFirstSeasonId(_appPaths, matched, info.Name, Logger, cancellationToken).ConfigureAwait(false);
+        return await AniDbSeasonResolver.ResolveFirstSeasonId(_appPaths, matched, info.Name ?? folderName, Logger, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1256,6 +1276,22 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
         => info.Year ?? info.PremiereDate?.Year;
 
     /// <summary>
+    /// The year a folder name carries, as "Ranma &#189; (1989)" does. It is what tells two
+    /// shows of one name apart, and it belongs to the folder rather than to whatever the item
+    /// has since been named.
+    /// </summary>
+    /// <param name="name">The folder name.</param>
+    /// <returns>The year, or <c>null</c> when the name carries none.</returns>
+    private static int? YearInName(string name)
+    {
+        var match = TrailingYearRegex().Match(name);
+
+        return match.Success && int.TryParse(match.Groups[1].ValueSpan, CultureInfo.InvariantCulture, out var year)
+            ? year
+            : null;
+    }
+
+    /// <summary>
     /// Reverses the order of the parts of a name.
     /// </summary>
     /// <param name="name">The name to reverse.</param>
@@ -1673,6 +1709,9 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
 
     [GeneratedRegex("banned", RegexOptions.IgnoreCase)]
     private static partial Regex BannedRegex();
+
+    [GeneratedRegex(@"\(([0-9]{4})\)\s*$", RegexOptions.CultureInvariant)]
+    private static partial Regex TrailingYearRegex();
 
     private struct GenreInfo
     {
