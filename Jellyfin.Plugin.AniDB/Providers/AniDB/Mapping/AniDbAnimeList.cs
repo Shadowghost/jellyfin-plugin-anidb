@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -46,6 +47,14 @@ internal static class AniDbAnimeList
     private static DateTime _failedAtUtc = DateTime.MinValue;
 
     /// <summary>
+    /// The placement worked out for every season already asked about, keyed by series id and
+    /// season number, holding an empty list for a season the list does not place. Each of a
+    /// season's episodes asks the same question, and the answer changes only when the list is
+    /// read again, which replaces this along with it.
+    /// </summary>
+    private static ConcurrentDictionary<string, IReadOnlyList<AniDbSeasonSegment>> _placements = new(StringComparer.Ordinal);
+
+    /// <summary>
     /// The AniDB entries the given season of the given series is filled from, in the order the
     /// season's episodes run through them.
     /// </summary>
@@ -69,11 +78,41 @@ internal static class AniDbAnimeList
 
         var siblings = await GetSiblings(appPaths, seriesId, logger, cancellationToken).ConfigureAwait(false);
 
-        if (siblings == null)
+        // Read after the load above, so that a list read afresh hands out the placements worked
+        // out from it rather than the ones its predecessor gave.
+        var placements = _placements;
+        var key = FormattableString.Invariant($"{seriesId}/{seasonNumber}");
+
+        if (placements.TryGetValue(key, out var known))
         {
-            return null;
+            return known.Count == 0 ? null : known;
         }
 
+        IReadOnlyList<AniDbSeasonSegment> segments = siblings == null ? [] : Place(siblings, seasonNumber);
+
+        // One line per season. Every episode of that season asks the same question, and the
+        // answer is the same every time, so logging it per episode only buries the rest.
+        if (placements.TryAdd(key, segments) && segments.Count > 0)
+        {
+            logger.LogInformation(
+                "The anime list fills season {SeasonNumber} of AniDB series {SeriesId} with {Placement}",
+                seasonNumber,
+                seriesId,
+                string.Join(", ", segments.Select(Describe)));
+        }
+
+        return segments.Count == 0 ? null : segments;
+    }
+
+    /// <summary>
+    /// Works out which of a series' AniDB entries fill the given season, and which of their
+    /// episodes each one contributes.
+    /// </summary>
+    /// <param name="siblings">Every entry the list files under the same series.</param>
+    /// <param name="seasonNumber">The season number.</param>
+    /// <returns>The segments, in the order the season's episodes run through them.</returns>
+    private static IReadOnlyList<AniDbSeasonSegment> Place(IReadOnlyList<AniDbAnimeListEntry> siblings, int seasonNumber)
+    {
         var claims = new List<AniDbSeasonSegment>();
 
         foreach (var entry in siblings)
@@ -121,7 +160,7 @@ internal static class AniDbAnimeList
 
         if (claims.Count == 0)
         {
-            return null;
+            return [];
         }
 
         // A segment with no count has to come last among those starting together, or it would
@@ -144,12 +183,6 @@ internal static class AniDbAnimeList
                 segments[index] = segments[index] with { EpisodeCount = room };
             }
         }
-
-        logger.LogInformation(
-            "The anime list places season {SeasonNumber} of AniDB series {SeriesId} in {Placement}",
-            seasonNumber,
-            seriesId,
-            string.Join(", ", segments.Select(Describe)));
 
         return segments;
     }
@@ -242,8 +275,11 @@ internal static class AniDbAnimeList
     }
 
     private static string Describe(AniDbSeasonSegment segment)
-        => FormattableString.Invariant(
-            $"anime {segment.AnimeId} from its episode {segment.FirstEpisodeInEntry} at episode {segment.FirstEpisodeNumber}");
+        => segment.EpisodeCount > 0
+            ? FormattableString.Invariant(
+                $"episodes {segment.FirstEpisodeNumber}-{segment.FirstEpisodeNumber + segment.EpisodeCount - 1} from anime {segment.AnimeId} episodes {segment.FirstEpisodeInEntry}-{segment.FirstEpisodeInEntry + segment.EpisodeCount - 1}")
+            : FormattableString.Invariant(
+                $"episodes {segment.FirstEpisodeNumber} onwards from anime {segment.AnimeId} episode {segment.FirstEpisodeInEntry} onwards");
 
     private static async Task<IReadOnlyList<AniDbAnimeListEntry>?> GetSiblings(
         IApplicationPaths appPaths,
@@ -431,6 +467,9 @@ internal static class AniDbAnimeList
 
         _byAnimeId = byAnimeId;
         _bySeries = bySeries.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<AniDbAnimeListEntry>)pair.Value, StringComparer.Ordinal);
+
+        // Placements worked out from the previous copy belong to it, not to this one.
+        _placements = new ConcurrentDictionary<string, IReadOnlyList<AniDbSeasonSegment>>(StringComparer.Ordinal);
 
         logger.LogInformation(
             "The anime list cached on {CachedAt} places {EntryCount} AniDB entries across {SeriesCount} shows. It is read once and kept in memory, and downloaded again after {MaxAgeDays} days",
