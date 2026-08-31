@@ -27,7 +27,7 @@
                     </style>
                     <h1>AniDB</h1>
                     <div class="anidbNotice">
-                        <h3>AniDB bans clients that send to many requests</h3>
+                        <h3>AniDB bans clients/IPs/VPNs that send to many requests</h3>
                         <p>AniDB allows one request every few seconds from an IP address and bans one that goes past that, for anything from 15 minutes to a day. The ban is on your address, not on this plugin, so it also stops anything else on the same connection from reaching AniDB.</p>
                         <p>The first scan of a library is where this is most likely: it asks about every show at once. The plugin paces its requests, waits a ban out rather than retrying into it, and keeps using what it has already cached, so a ban costs you missing metadata for a while rather than anything permanent - refresh those items once it has lifted. It is worth scanning a handful of shows first and letting the rest follow.</p>
                         <p>Do not lower <em>Maximum Cache Age</em> or <em>Request Interval</em> below their defaults, and raise the interval if anything else on this address talks to AniDB. If a scan seems to have stalled, check the status below before restarting anything: restarting does not clear a ban.</p>
