@@ -749,6 +749,13 @@ internal static partial class AniDbSeasonResolver
     /// Whether a name is asking for one season of a show rather than for the show itself, as a
     /// folder named "Show Season 2" is.
     /// </summary>
+    /// <remarks>
+    /// A season is also named by the word for it in another language, and by the name a final
+    /// season is given instead of a number: AniDB files fifteen entries as "Kanketsuhen" and
+    /// titles them "The Final Act" in English, InuYasha's eighth season among them. Such a name
+    /// read as the show's own took the show's first entry and left the season it asked for
+    /// unidentified.
+    /// </remarks>
     /// <param name="name">The name the series was searched under.</param>
     /// <returns><c>true</c> when the name ends in a season marker.</returns>
     public static bool NamesASeason(string? name)
@@ -1365,7 +1372,7 @@ internal static partial class AniDbSeasonResolver
     /// <summary>
     /// A season number, as it is written at the end of a folder name.
     /// </summary>
-    [GeneratedRegex(@"(\b(season|part|series|stage|cour)\s*\d+|\b\d+(st|nd|rd|th)\s+(season|part|series|stage|cour)|\b(final\s+season)|\s(II|III|IV|V|VI|VII|VIII|IX|X))\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(\b(season|staffel|part|series|stage|cour)\s*\d+|\b\d+(st|nd|rd|th)\s+(season|staffel|part|series|stage|cour)|\b\d+\.\s*(season|staffel|part|series|stage|cour)|\b(final\s+(season|act|chapter))|\bkanketsuhen|\s(II|III|IV|V|VI|VII|VIII|IX|X))\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SeasonMarkerRegex();
 
     /// <summary>
