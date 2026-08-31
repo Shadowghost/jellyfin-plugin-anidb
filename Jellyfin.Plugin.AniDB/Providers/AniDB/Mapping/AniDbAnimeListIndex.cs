@@ -1,0 +1,339 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Xml.Linq;
+using Jellyfin.Plugin.AniDB.Providers.AniDB.Metadata;
+using Microsoft.Extensions.Logging;
+
+namespace Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
+
+/// <summary>
+/// The community anime list, as read from one downloaded copy of it.
+/// </summary>
+internal sealed class AniDbAnimeListIndex
+{
+    private readonly IReadOnlyDictionary<string, AniDbAnimeListEntry> _byAnimeId;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<AniDbAnimeListEntry>> _bySeries;
+
+    private AniDbAnimeListIndex(
+        IReadOnlyDictionary<string, AniDbAnimeListEntry> byAnimeId,
+        IReadOnlyDictionary<string, IReadOnlyList<AniDbAnimeListEntry>> bySeries)
+    {
+        _byAnimeId = byAnimeId;
+        _bySeries = bySeries;
+    }
+
+    /// <summary>
+    /// Gets the placement worked out for every season already asked about, keyed by series id
+    /// and season number, holding an empty list for a season the list does not place. Each of a
+    /// season's episodes asks the same question, and the answer changes only when the list is
+    /// read again, which replaces this along with it.
+    /// </summary>
+    public ConcurrentDictionary<string, IReadOnlyList<AniDbSeasonSegment>> Placements { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Gets how many AniDB entries the list places against a TVDB series.
+    /// </summary>
+    public int EntryCount => _byAnimeId.Count;
+
+    /// <summary>
+    /// Reads a downloaded copy of the list.
+    /// </summary>
+    /// <param name="path">Where the copy is cached.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cachedAtUtc">When the copy was written.</param>
+    /// <returns>The list.</returns>
+    public static AniDbAnimeListIndex Parse(string path, ILogger logger, DateTime cachedAtUtc)
+    {
+        var byAnimeId = new Dictionary<string, AniDbAnimeListEntry>(StringComparer.Ordinal);
+        var bySeries = new Dictionary<string, List<AniDbAnimeListEntry>>(StringComparer.Ordinal);
+
+        foreach (var element in XDocument.Load(path).Root?.Elements("anime") ?? [])
+        {
+            var animeId = element.Attribute("anidbid")?.Value;
+            var seriesKey = element.Attribute("tvdbid")?.Value;
+
+            // A film or an OVA the list files under no series has nothing to place it against.
+            if (string.IsNullOrEmpty(animeId) || string.IsNullOrEmpty(seriesKey) || !seriesKey.All(char.IsAsciiDigit))
+            {
+                continue;
+            }
+
+            var entry = new AniDbAnimeListEntry(
+                animeId,
+                seriesKey,
+                element.Attribute("defaulttvdbseason")?.Value,
+                ReadInt(element.Attribute("episodeoffset")?.Value),
+                [.. element.Descendants("mapping").Select(ReadMapping).OfType<AniDbAnimeListMapping>()]);
+
+            byAnimeId[animeId] = entry;
+
+            if (!bySeries.TryGetValue(seriesKey, out var siblings))
+            {
+                siblings = [];
+                bySeries[seriesKey] = siblings;
+            }
+
+            siblings.Add(entry);
+        }
+
+        logger.LogInformation(
+            "The anime list cached on {CachedAt} places {EntryCount} AniDB entries across {SeriesCount} shows",
+            cachedAtUtc,
+            byAnimeId.Count,
+            bySeries.Count);
+
+        return new AniDbAnimeListIndex(
+            byAnimeId,
+            bySeries.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<AniDbAnimeListEntry>)pair.Value, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Every entry the list files under the same show as the given one.
+    /// </summary>
+    /// <param name="animeId">The AniDB id of an entry of the show.</param>
+    /// <returns>The entries, or <c>null</c> where the list does not place that one.</returns>
+    public IReadOnlyList<AniDbAnimeListEntry>? Siblings(string animeId)
+    {
+        if (!_byAnimeId.TryGetValue(animeId, out var self))
+        {
+            return null;
+        }
+
+        return _bySeries.TryGetValue(self.SeriesKey, out var siblings) ? siblings : null;
+    }
+
+    /// <summary>
+    /// The entry a show begins in, found from the TVDB id another provider has already settled
+    /// on. The list keys its entries by TVDB id, so this identifies a show outright where
+    /// matching on the name cannot: where AniDB spells the name differently, and where two
+    /// shows share one name and only the id tells them apart.
+    /// </summary>
+    /// <param name="tvdbId">The TVDB series id.</param>
+    /// <returns>The AniDB id, or <c>null</c> where the list files nothing under that id.</returns>
+    public string? FirstSeasonByTvdb(string tvdbId)
+        => _bySeries.TryGetValue(tvdbId, out var siblings) ? PickFirstSeason(siblings) : null;
+
+    /// <summary>
+    /// The entry a show begins in, given an entry of it the list files as a later season.
+    /// </summary>
+    /// <param name="animeId">The AniDB id the name match produced.</param>
+    /// <returns>The AniDB id the show begins at, or <c>null</c> where the list does not place the entry or already places it at the show's first season.</returns>
+    public string? WalkBackToFirstSeason(string animeId)
+    {
+        // Only an entry the list files as a second season or later is walked back. An entry it
+        // already files at season 1 is the show's own start, and moving it could only hand the
+        // show to whatever else shares its TVDB id: the list groups a handful of unrelated
+        // shows under one id, and two adaptations of one book sit that way under season 1.
+        if (!_byAnimeId.TryGetValue(animeId, out var self) || SeasonOf(self) <= 1)
+        {
+            return null;
+        }
+
+        if (!_bySeries.TryGetValue(self.SeriesKey, out var siblings))
+        {
+            return null;
+        }
+
+        var first = PickFirstSeason(siblings);
+
+        return string.Equals(first, animeId, StringComparison.Ordinal) ? null : first;
+    }
+
+    /// <summary>
+    /// Which of the entries filed under one show the show begins in.
+    /// </summary>
+    /// <param name="siblings">Every entry the list files under the same show.</param>
+    /// <returns>The AniDB id of the earliest entry, or <c>null</c> when none of them fills a season.</returns>
+    public static string? PickFirstSeason(IReadOnlyList<AniDbAnimeListEntry> siblings)
+    {
+        // The show begins in the entry filling its earliest season, and where that season was
+        // released in parts, in the part starting at its first episode. Where a season is
+        // filled by several entries starting together - a show and the recap or alternate
+        // version filed beside it - the oldest of them is the show itself, AniDB having
+        // registered it before whatever was made from it.
+        //
+        // Season 0 is an entry holding nothing but specials, which is never where a show
+        // begins, and a season that will not parse is one the list cannot place at all.
+        return siblings
+            .Select(entry => (Entry: entry, Season: SeasonOf(entry)))
+            .Where(candidate => candidate.Season >= 1)
+            .OrderBy(candidate => candidate.Season)
+            .ThenBy(candidate => candidate.Entry.EpisodeOffset)
+            .ThenBy(candidate => int.TryParse(candidate.Entry.AnimeId, CultureInfo.InvariantCulture, out var id) ? id : int.MaxValue)
+            .Select(candidate => candidate.Entry.AnimeId)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// The season an entry fills, as a number. An entry numbered straight through the whole
+    /// show carries "a" rather than a season, and covers that show from its first episode.
+    /// </summary>
+    /// <param name="entry">The entry.</param>
+    /// <returns>The season number, or -1 where the entry names no season this can read.</returns>
+    public static int SeasonOf(AniDbAnimeListEntry entry)
+    {
+        if (string.Equals(entry.DefaultSeason, "a", StringComparison.OrdinalIgnoreCase))
+        {
+            return 1;
+        }
+
+        return int.TryParse(entry.DefaultSeason, CultureInfo.InvariantCulture, out var parsed) ? parsed : -1;
+    }
+
+    /// <summary>
+    /// Works out which of a series' AniDB entries fill the given season, and which of their
+    /// episodes each one contributes.
+    /// </summary>
+    /// <param name="siblings">Every entry the list files under the same series.</param>
+    /// <param name="seasonNumber">The season number.</param>
+    /// <returns>The segments, in the order the season's episodes run through them.</returns>
+    public static IReadOnlyList<AniDbSeasonSegment> Place(IReadOnlyList<AniDbAnimeListEntry> siblings, int seasonNumber)
+    {
+        var claims = new List<AniDbSeasonSegment>();
+
+        foreach (var entry in siblings)
+        {
+            var placed = false;
+
+            foreach (var mapping in entry.Mappings)
+            {
+                // A rule naming episodes one by one places specials, not a run of a season.
+                if (mapping.TvdbSeason != seasonNumber
+                    || mapping.AnidbSeason == 0
+                    || mapping.Start is not { } start
+                    || mapping.End < start)
+                {
+                    continue;
+                }
+
+                // A rule with no end runs to the end of the entry. That is how the list places
+                // the season now airing, whose last episode nobody knows yet, and dropping such
+                // a rule left that season with no placement at all.
+                var count = mapping.End is { } end ? end - start + 1 : 0;
+
+                claims.Add(new AniDbSeasonSegment(entry.AnimeId, start + mapping.Offset, count, start));
+                placed = true;
+            }
+
+            // The season an entry names is where the rest of it goes, unless a rule above has
+            // already placed part of it in this same season.
+            if (!placed
+                && int.TryParse(entry.DefaultSeason, CultureInfo.InvariantCulture, out var defaultSeason)
+                && defaultSeason == seasonNumber)
+            {
+                // The list does not say how long an entry is, so the claim runs to the end of
+                // the season. It stops early only where a rule hands the rest of the entry to
+                // another season, as a series split across two of them does.
+                var handedOver = entry.Mappings
+                    .Where(mapping => mapping.TvdbSeason != seasonNumber && mapping.AnidbSeason != 0 && mapping.Start.HasValue)
+                    .Select(mapping => mapping.Start!.Value)
+                    .DefaultIfEmpty(0)
+                    .Min();
+
+                claims.Add(new AniDbSeasonSegment(entry.AnimeId, entry.EpisodeOffset + 1, Math.Max(handedOver - 1, 0), 1));
+            }
+        }
+
+        return SeasonSegments.Order(claims);
+    }
+
+    /// <summary>
+    /// Where the given episode of the specials season is read from.
+    /// </summary>
+    /// <param name="siblings">Every entry the list files under the same series.</param>
+    /// <param name="episodeNumber">The episode number within the specials season.</param>
+    /// <returns>The episode, or <c>null</c> when the list does not place it.</returns>
+    public static AniDbAnimeListEpisode? PlaceSpecial(IReadOnlyList<AniDbAnimeListEntry> siblings, int episodeNumber)
+    {
+        // A rule naming this episode outright beats anything worked out from an offset.
+        foreach (var entry in siblings)
+        {
+            foreach (var mapping in entry.Mappings)
+            {
+                if (mapping.TvdbSeason != 0)
+                {
+                    continue;
+                }
+
+                foreach (var pair in mapping.Pairs)
+                {
+                    // A season number of 0 says the episode has no counterpart to name.
+                    if (pair.Value == episodeNumber && pair.Value != 0)
+                    {
+                        return new AniDbAnimeListEpisode(entry.AnimeId, pair.Key, mapping.AnidbSeason == 0);
+                    }
+                }
+
+                if (mapping.Start is { } start)
+                {
+                    var number = episodeNumber - mapping.Offset;
+
+                    if (number >= start && number <= (mapping.End ?? int.MaxValue))
+                    {
+                        return new AniDbAnimeListEpisode(entry.AnimeId, number, mapping.AnidbSeason == 0);
+                    }
+                }
+            }
+        }
+
+        // Otherwise the entry that starts closest below this episode is the one holding it. An
+        // entry that has a rule for the specials has already had its say above.
+        AniDbAnimeListEntry? holder = null;
+
+        foreach (var entry in siblings)
+        {
+            if (!string.Equals(entry.DefaultSeason, "0", StringComparison.Ordinal)
+                || entry.EpisodeOffset >= episodeNumber
+                || entry.Mappings.Any(mapping => mapping.TvdbSeason == 0))
+            {
+                continue;
+            }
+
+            if (holder == null || entry.EpisodeOffset > holder.EpisodeOffset)
+            {
+                holder = entry;
+            }
+        }
+
+        return holder == null ? null : new AniDbAnimeListEpisode(holder.AnimeId, episodeNumber - holder.EpisodeOffset, false);
+    }
+
+    private static AniDbAnimeListMapping? ReadMapping(XElement element)
+    {
+        if (element.Attribute("tvdbseason") == null)
+        {
+            return null;
+        }
+
+        var pairs = new List<KeyValuePair<int, int>>();
+
+        foreach (var pair in (element.Value ?? string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var separator = pair.IndexOf('-', StringComparison.Ordinal);
+
+            if (separator > 0
+                && int.TryParse(pair[..separator], CultureInfo.InvariantCulture, out var inEntry)
+                && int.TryParse(pair[(separator + 1)..], CultureInfo.InvariantCulture, out var inSeason))
+            {
+                pairs.Add(new KeyValuePair<int, int>(inEntry, inSeason));
+            }
+        }
+
+        return new AniDbAnimeListMapping(
+            ReadInt(element.Attribute("anidbseason")?.Value),
+            ReadInt(element.Attribute("tvdbseason")?.Value),
+            ReadNullableInt(element.Attribute("start")?.Value),
+            ReadNullableInt(element.Attribute("end")?.Value),
+            ReadInt(element.Attribute("offset")?.Value),
+            pairs);
+    }
+
+    private static int ReadInt(string? value)
+        => int.TryParse(value, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+
+    private static int? ReadNullableInt(string? value)
+        => int.TryParse(value, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+}
