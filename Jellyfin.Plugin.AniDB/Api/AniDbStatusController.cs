@@ -33,6 +33,7 @@ public class AniDbStatusController(IApplicationPaths applicationPaths) : Control
     {
         var (banRemaining, queued, untilNext, sent, lastSentUtc) = AniDbSeriesProvider.GetRequestStatus();
         var (cachedAtUtc, entryCount, maxAgeInDays) = AniDbAnimeList.GetStatus(_applicationPaths);
+        var (bridgeCachedAtUtc, bridgeEntryCount, bridgeMaxAgeInDays) = AniBridgeMappings.GetStatus(_applicationPaths);
 
         return new AniDbStatus
         {
@@ -45,7 +46,11 @@ public class AniDbStatusController(IApplicationPaths applicationPaths) : Control
             RequestIntervalMs = Plugin.Instance.Configuration.RequestIntervalMs,
             AnimeListCachedAtUtc = cachedAtUtc,
             AnimeListEntryCount = entryCount,
-            AnimeListMaxAgeDays = maxAgeInDays
+            AnimeListMaxAgeDays = maxAgeInDays,
+            AniBridgeCachedAtUtc = bridgeCachedAtUtc,
+            AniBridgeEntryCount = bridgeEntryCount,
+            AniBridgeMaxAgeDays = bridgeMaxAgeInDays,
+            AniBridgeEnabled = Plugin.Instance.Configuration.UseAniBridgeMappings
         };
     }
 }

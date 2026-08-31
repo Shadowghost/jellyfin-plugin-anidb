@@ -38,6 +38,7 @@
                             <div class="anidbStatusLine"><dt>AniDB</dt><dd id="anidbState">Loading...</dd></div>
                             <div class="anidbStatusLine"><dt>Requests waiting</dt><dd id="anidbQueued">-</dd></div>
                             <div class="anidbStatusLine"><dt>Requests sent since start</dt><dd id="anidbSent">-</dd></div>
+                            <div class="anidbStatusLine"><dt>AniBridge mappings</dt><dd id="anidbAniBridge">-</dd></div>
                             <div class="anidbStatusLine"><dt>Anime list</dt><dd id="anidbAnimeList">-</dd></div>
                         </dl>
                     </div>
@@ -72,7 +73,14 @@
                                 <input id="chkIgnoreSeason" name="chkIgnoreSeason" type="checkbox" is="emby-checkbox" />
                                 <span>Ignore Season</span>
                             </label>
-                            <div class="fieldDescription">Use the series' own AniDB entry for every season, numbering episodes straight through. This overrides the mapping described above, so it is only worth setting for a show the anime list places wrongly or does not carry at all - a long-running show kept as one AniDB entry, such as One Piece, no longer needs it. Leave unchecked to give each season the AniDB entry that belongs to it.</div>
+                            <div class="fieldDescription">Use the series' own AniDB entry for every season, numbering episodes straight through. This overrides the mapping described above, so it is only worth setting for a show the mapping sources place wrongly or do not carry at all - a long-running show kept as one AniDB entry, such as One Piece, no longer needs it. Leave unchecked to give each season the AniDB entry that belongs to it.</div>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input id="chkUseAniBridgeMappings" name="chkUseAniBridgeMappings" type="checkbox" is="emby-checkbox" />
+                                <span>Use The AniBridge Mappings</span>
+                            </label>
+                            <div class="fieldDescription">Consult the AniBridge mappings before the anime list when working out which AniDB entry fills a season. They place half again as many entries, state each season's episode ranges outright rather than leaving them to be worked out from an offset, and are the only source here that can identify a show from its TMDB id, which matters because Jellyfin takes TMDB as the provider for shows by default. The anime list still answers for whatever they do not place. Uncheck to leave the anime list to place everything, which is worth doing only where the mappings place one of your shows wrongly.</div>
                         </div>
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
@@ -216,6 +224,14 @@
                         document.getElementById('anidbSent').textContent = status.RequestsSent
                             + ' (last ' + AniDBConfigurationPage.formatDate(status.LastRequestUtc) + ')';
 
+                        document.getElementById('anidbAniBridge').textContent = !status.AniBridgeEnabled
+                            ? 'not used'
+                            : status.AniBridgeCachedAtUtc
+                                ? 'downloaded ' + AniDBConfigurationPage.formatDate(status.AniBridgeCachedAtUtc)
+                                    + ', ' + status.AniBridgeEntryCount + ' entries read, downloaded again once '
+                                    + status.AniBridgeMaxAgeDays + ' days old'
+                                : 'not downloaded yet';
+
                         document.getElementById('anidbAnimeList').textContent = status.AnimeListCachedAtUtc
                             ? 'downloaded ' + AniDBConfigurationPage.formatDate(status.AnimeListCachedAtUtc)
                                 + ', ' + status.AnimeListEntryCount + ' entries read, downloaded again once '
@@ -237,6 +253,7 @@
                             document.getElementById('titleLanguage').value = config.TitlePreference;
                             document.getElementById('originalTitleLanguage').value = config.OriginalTitlePreference;
                             document.getElementById('chkIgnoreSeason').checked = config.IgnoreSeason;
+                            document.getElementById('chkUseAniBridgeMappings').checked = config.UseAniBridgeMappings;
                             document.getElementById('chkUseAniDbSeasonNames').checked = config.UseAniDbSeasonNames;
                             document.getElementById('chkImportGenres').checked = config.ImportGenres;
                             document.getElementById('chkImportTags').checked = config.ImportTags;
@@ -264,6 +281,7 @@
                             config.TitlePreference = document.getElementById('titleLanguage').value;
                             config.OriginalTitlePreference = document.getElementById('originalTitleLanguage').value;
                             config.IgnoreSeason = document.getElementById('chkIgnoreSeason').checked;
+                            config.UseAniBridgeMappings = document.getElementById('chkUseAniBridgeMappings').checked;
                             config.UseAniDbSeasonNames = document.getElementById('chkUseAniDbSeasonNames').checked;
                             config.ImportGenres = document.getElementById('chkImportGenres').checked;
                             config.ImportTags = document.getElementById('chkImportTags').checked;

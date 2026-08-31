@@ -59,4 +59,26 @@ public class AniDbStatus
     /// Gets or sets how many days the cached copy is used for before it is downloaded again.
     /// </summary>
     public int AnimeListMaxAgeDays { get; set; }
+
+    /// <summary>
+    /// Gets or sets when the cached copy of the AniBridge mappings was downloaded, or
+    /// <c>null</c> when none has been.
+    /// </summary>
+    public DateTime? AniBridgeCachedAtUtc { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many AniDB entries have been read from that copy. Zero until the
+    /// first season is looked up, which is when the mappings are first read.
+    /// </summary>
+    public int AniBridgeEntryCount { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many days the cached copy is used for before it is downloaded again.
+    /// </summary>
+    public int AniBridgeMaxAgeDays { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the AniBridge mappings are consulted at all.
+    /// </summary>
+    public bool AniBridgeEnabled { get; set; }
 }
