@@ -554,6 +554,9 @@ internal static partial class AniDbSeasonResolver
 
         var chain = new List<AniDbAnimeSummary> { first };
         var chainIndex = 0;
+
+        // How many episodes of the entry at that position earlier seasons have already taken.
+        var consumedInEntry = 0;
         var complete = true;
 
         foreach (var season in layout?.Seasons ?? GetAssumedSeasons())
@@ -577,13 +580,20 @@ internal static partial class AniDbSeasonResolver
                     break;
                 }
 
-                // An entry AniDB gives no episode count for takes whatever the season has left,
-                // so that it is never the reason a second entry is pulled in.
-                var count = entry.EpisodeCount > 0 ? entry.EpisodeCount : Math.Max(season.EpisodeCount - covered, 0);
+                var (count, outlastsSeason) = Allocate(entry.EpisodeCount, consumedInEntry, season.EpisodeCount, covered);
 
-                segments.Add(new AniDbSeasonSegment(entry.Id, season.FirstEpisodeNumber + covered, count));
+                segments.Add(new AniDbSeasonSegment(entry.Id, season.FirstEpisodeNumber + covered, count, consumedInEntry + 1));
                 covered += count;
-                chainIndex++;
+
+                if (outlastsSeason)
+                {
+                    consumedInEntry += count;
+                }
+                else
+                {
+                    chainIndex++;
+                    consumedInEntry = 0;
+                }
 
                 if (season.EpisodeCount - covered < MinimumSplitEpisodes || segments.Count >= MaxSegmentsPerSeason)
                 {
@@ -632,6 +642,40 @@ internal static partial class AniDbSeasonResolver
         }
 
         return mapping;
+    }
+
+    /// <summary>
+    /// How much of an entry one season takes, and whether the entry runs on past it.
+    /// </summary>
+    /// <remarks>
+    /// An entry with more episodes left than the season has room for is one that the season
+    /// numbering breaks into several seasons, as a long-running show kept as a single AniDB
+    /// entry is: Dragon Ball Z is one entry of 291 episodes that TVDB splits into nine. Such an
+    /// entry gives this season what fits and keeps the rest for the next one. Taking a fresh
+    /// entry per season instead left every season past the first with nothing, the chain having
+    /// run out after one.
+    /// </remarks>
+    /// <param name="entryEpisodeCount">How many episodes AniDB records for the entry, or 0 where it records none.</param>
+    /// <param name="consumedInEntry">How many of the entry's episodes earlier seasons have taken.</param>
+    /// <param name="seasonEpisodeCount">How many episode numbers the season spans, or 0 where the library cannot be read.</param>
+    /// <param name="covered">How many of the season's episodes the segments so far account for.</param>
+    /// <returns>How many episodes this season takes from the entry, and whether the entry has episodes left over.</returns>
+    private static (int Count, bool OutlastsSeason) Allocate(int entryEpisodeCount, int consumedInEntry, int seasonEpisodeCount, int covered)
+    {
+        var room = Math.Max(seasonEpisodeCount - covered, 0);
+
+        // An entry AniDB gives no episode count for takes whatever the season has left, so that
+        // it is never the reason a second entry is pulled in. Without a season length to fit it
+        // to there is nothing to split against either, and the entry answers for the season
+        // whole, which is what a library that cannot be read has always been given.
+        if (entryEpisodeCount <= 0 || seasonEpisodeCount <= 0)
+        {
+            return (entryEpisodeCount > 0 ? entryEpisodeCount - consumedInEntry : room, false);
+        }
+
+        var left = entryEpisodeCount - consumedInEntry;
+
+        return left > room ? (room, true) : (left, false);
     }
 
     /// <summary>
