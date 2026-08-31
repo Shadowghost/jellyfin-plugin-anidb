@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.AniDB.Providers.AniDB.Metadata;
@@ -30,37 +31,49 @@ internal static class AniDbMappings
     private const string AnimeList = "the anime list";
 
     /// <summary>
-    /// The AniDB entries the given season of the given series is filled from, in the order the
-    /// season's episodes run through them.
+    /// How each source that places the given season says it is filled, best account first.
     /// </summary>
+    /// <remarks>
+    /// Every source that places the season is offered, rather than only the first, because a
+    /// placement is a claim about entries that may not hold the episodes it claims. The caller
+    /// checks each against what AniDB records and takes the first that holds up, so that a
+    /// season one source is wrong about is still filled by the other.
+    /// </remarks>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
     /// <param name="seriesId">The AniDB id of the series.</param>
     /// <param name="seasonNumber">The season number.</param>
     /// <param name="logger">The logger of whichever provider is asking.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The segments, or <c>null</c> when neither source places that season.</returns>
-    public static async Task<IReadOnlyList<AniDbSeasonSegment>?> ResolveSeason(
+    /// <returns>The placements, in the order they are worth trying, or empty when no source places the season.</returns>
+    public static async Task<IReadOnlyList<SeasonPlacement>> ResolveSeasons(
         IApplicationPaths appPaths,
         string seriesId,
         int seasonNumber,
         ILogger logger,
         CancellationToken cancellationToken)
     {
+        var placements = new List<SeasonPlacement>(2);
+
         var bridged = await AniBridgeMappings.ResolveSeason(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
 
         if (bridged != null)
         {
-            return bridged;
+            placements.Add(new SeasonPlacement(bridged, AniBridge));
         }
 
         var listed = await AniDbAnimeList.ResolveSeason(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
 
-        if (listed != null)
+        if (listed != null && (bridged == null || !bridged.SequenceEqual(listed)))
+        {
+            placements.Add(new SeasonPlacement(listed, AnimeList));
+        }
+
+        if (bridged == null && listed != null)
         {
             await ReportGap(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
         }
 
-        return listed;
+        return placements;
     }
 
     /// <summary>

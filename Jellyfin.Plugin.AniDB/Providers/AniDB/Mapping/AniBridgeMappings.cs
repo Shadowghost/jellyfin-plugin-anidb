@@ -77,11 +77,13 @@ internal static class AniBridgeMappings
         var siblings = index.Siblings(seriesId);
         var segments = siblings == null ? [] : AniBridgeIndex.Place(siblings, seasonNumber);
 
-        // One line per season. Every episode of that season asks the same question, and the
-        // answer is the same every time, so logging it per episode only buries the rest.
+        // One line per season, and only at debug: the season resolver reports the placement it
+        // settles on, so reporting each source's own account again would say it twice. Every
+        // episode of the season asks the same question and gets the same answer, so the memo
+        // above is what keeps this from being logged per episode.
         if (index.Placements.TryAdd(key, segments) && segments.Count > 0)
         {
-            logger.LogInformation(
+            logger.LogDebug(
                 "The AniBridge mappings fill season {SeasonNumber} of AniDB series {SeriesId} with {Placement}",
                 seasonNumber,
                 seriesId,
