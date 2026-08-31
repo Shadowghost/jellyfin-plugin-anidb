@@ -396,16 +396,27 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
             }
         }
 
-        var matched = string.IsNullOrEmpty(info.Name)
+        // The folder is what the user named, and it still says which show this is where the name
+        // on the item no longer does.
+        var folderName = Path.GetFileName(info.Path?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var truncated = IsTruncation(info.Name, folderName);
+
+        if (truncated)
+        {
+            Logger?.LogInformation(
+                "{SeriesName} is what is left of the folder name {FolderName} once it was cut short, so the folder is searched instead. A name with no letters in it matches almost any anime, this search being a fuzzy one, and matching the wrong one would settle the show for good",
+                info.Name,
+                folderName);
+        }
+
+        var matched = string.IsNullOrEmpty(info.Name) || truncated
             ? string.Empty
             : await Equals_check.XmlFindId(info.Name, GetLookupYear(info), cancellationToken).ConfigureAwait(false);
 
         // The name searched above is the item's, which is whatever provider reached it first,
         // and a provider that matched the wrong show has already renamed it to that show. The
-        // folder is what the user named and still says which show this is, so it gets an
-        // attempt of its own, under the year written into it rather than the wrong show's.
-        var folderName = Path.GetFileName(info.Path?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-
+        // folder gets an attempt of its own, under the year written into it rather than the
+        // wrong show's.
         if (string.IsNullOrEmpty(matched)
             && !string.IsNullOrEmpty(folderName)
             && !string.Equals(folderName, info.Name, StringComparison.OrdinalIgnoreCase))
@@ -1385,6 +1396,33 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     /// <returns>The year, or <c>null</c> when nothing gives one.</returns>
     private static int? GetLookupYear(ItemLookupInfo info)
         => info.Year ?? info.PremiereDate?.Year;
+
+    /// <summary>
+    /// Whether the name on the item is the folder name cut short rather than a name of its own.
+    /// </summary>
+    /// <remarks>
+    /// A show whose name begins with a number and a dot arrives here named with just that
+    /// number: "2.43: Seiin High School Boys Volleyball Team" in a folder of that name reaches
+    /// this as "2". Whatever cut it is not this plugin - nothing here reads a name apart at a
+    /// dot - but searching what is left would match almost any anime, the search being fuzzy and
+    /// a single digit appearing in thousands of titles, and a match however wrong would keep the
+    /// folder from being tried at all. A name with no letter anywhere in it is the mark of such
+    /// a cut: a real title of that shape - "009-1", "001", "663114" - is its folder's name
+    /// whole rather than the start of it.
+    /// </remarks>
+    /// <param name="name">The name on the item.</param>
+    /// <param name="folderName">The name of the folder holding it.</param>
+    /// <returns><c>true</c> where the name is the folder name cut short.</returns>
+    private static bool IsTruncation(string? name, string? folderName)
+    {
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(folderName) || name.Any(char.IsLetter))
+        {
+            return false;
+        }
+
+        return folderName.Length > name.Length
+            && folderName.StartsWith(name, StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// The year a folder name carries, as "Ranma &#189; (1989)" does. It is what tells two
