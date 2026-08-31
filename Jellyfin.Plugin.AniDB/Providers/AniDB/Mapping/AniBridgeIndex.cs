@@ -27,12 +27,6 @@ internal sealed class AniBridgeIndex
     /// </summary>
     private const int OtherEpisodeBand = 400;
 
-    /// <summary>
-    /// The longest season this will lay out episode by episode. One Piece's longest is under
-    /// two hundred, so anything past this is a mapping to be taken whole rather than walked.
-    /// </summary>
-    private const int MaxEpisodesPerSeason = 2000;
-
     private readonly IReadOnlyDictionary<string, AniBridgeEntry> _byAnimeId;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<AniBridgeEntry>> _bySeries;
     private readonly IReadOnlyDictionary<string, string> _firstSeasonByTmdb;
@@ -167,114 +161,19 @@ internal sealed class AniBridgeIndex
         {
             foreach (var span in entry.Spans)
             {
-                // A span of an entry's specials cannot be described as part of an ordinary
-                // season: a season filled from them would have to be read from the entry's
-                // specials, and that is what the specials season is for.
-                if (span.Season != seasonNumber || span.Kind == AniDbEpisodeKind.Special)
+                // A season can be filled from any of an entry's numberings, the specials
+                // included: K-On!'s first season ends with two of them, and the segment says so
+                // rather than the episode being left unidentified.
+                if (span.Season != seasonNumber)
                 {
                     continue;
                 }
 
-                if (!claims.TryGetValue(span.Kind, out var byKind))
-                {
-                    byKind = [];
-                    claims[span.Kind] = byKind;
-                }
-
-                byKind.Add(new AniDbSeasonSegment(entry.AnimeId, span.InSeason.Start, CountOf(span), span.InEntry.Start, span.Kind));
+                SeasonSegments.Add(claims, new AniDbSeasonSegment(entry.AnimeId, span.InSeason.Start, CountOf(span), span.InEntry.Start, span.Kind));
             }
         }
 
-        if (claims.Count == 0)
-        {
-            return [];
-        }
-
-        return SeasonSegments.Order(claims.Count == 1 ? claims.First().Value : Merge(claims));
-    }
-
-    /// <summary>
-    /// Lays the claims of several numberings over one season, episode by episode.
-    /// </summary>
-    /// <remarks>
-    /// Two numberings of one entry usually describe different parts of the season rather than
-    /// the same part: anime 162's other episodes fill season 1's episodes 2, 3, 13, 17, 18 and
-    /// 34, and its ordinary episodes fill the rest, the two not meeting anywhere. Taking one
-    /// numbering and dropping the other left those six episodes to be read from ordinary
-    /// episodes that are not what they hold.
-    /// <para>
-    /// Where two numberings do claim the same episode, one of them is a stub: anime 13473 maps a
-    /// single ordinary episode onto a season its other episodes describe in full, and anime
-    /// 11350 maps a single other episode onto a season its ordinary episodes describe in full.
-    /// The numbering that covers more of the season is the one describing it, so it wins the
-    /// episodes they disagree about, and ordinary episodes win an even tie.
-    /// </para>
-    /// </remarks>
-    /// <param name="claims">The claims on the season, by the numbering that made them.</param>
-    /// <returns>The segments, one per run of consecutive episodes read the same way.</returns>
-    private static List<AniDbSeasonSegment> Merge(Dictionary<AniDbEpisodeKind, List<AniDbSeasonSegment>> claims)
-    {
-        var ordered = claims
-            .OrderByDescending(pair => pair.Value.Sum(segment => segment.EpisodeCount == 0 ? int.MaxValue : segment.EpisodeCount))
-            .ThenBy(pair => pair.Key == AniDbEpisodeKind.Regular ? 0 : 1)
-            .ToList();
-
-        // A run with no end cannot be laid out episode by episode, and neither can a season of
-        // implausible length. Neither occurs in the set; where one did, the numbering covering
-        // most of the season answers for the whole of it, as it did before this.
-        if (ordered.Exists(pair => pair.Value.Exists(segment => segment.EpisodeCount <= 0 || segment.EpisodeCount > MaxEpisodesPerSeason)))
-        {
-            return ordered[0].Value;
-        }
-
-        var placed = new Dictionary<int, AniDbSeasonSegment>();
-
-        foreach (var (_, segments) in ordered)
-        {
-            foreach (var segment in segments)
-            {
-                for (var offset = 0; offset < segment.EpisodeCount; offset++)
-                {
-                    var episode = segment.FirstEpisodeNumber + offset;
-
-                    // The first numbering to claim an episode keeps it.
-                    if (!placed.ContainsKey(episode))
-                    {
-                        placed[episode] = new AniDbSeasonSegment(
-                            segment.AnimeId,
-                            episode,
-                            1,
-                            segment.FirstEpisodeInEntry + offset,
-                            segment.Kind);
-                    }
-                }
-            }
-        }
-
-        var merged = new List<AniDbSeasonSegment>();
-
-        foreach (var episode in placed.Keys.Order())
-        {
-            var one = placed[episode];
-
-            // Episodes read consecutively from the same run of the same entry are one segment
-            // again, so that a season no numbering interrupts is described as plainly as before.
-            if (merged.Count > 0
-                && merged[^1] is { } last
-                && string.Equals(last.AnimeId, one.AnimeId, StringComparison.Ordinal)
-                && last.Kind == one.Kind
-                && last.FirstEpisodeNumber + last.EpisodeCount == one.FirstEpisodeNumber
-                && last.FirstEpisodeInEntry + last.EpisodeCount == one.FirstEpisodeInEntry)
-            {
-                merged[^1] = last with { EpisodeCount = last.EpisodeCount + 1 };
-
-                continue;
-            }
-
-            merged.Add(one);
-        }
-
-        return merged;
+        return SeasonSegments.Resolve(claims);
     }
 
     /// <summary>

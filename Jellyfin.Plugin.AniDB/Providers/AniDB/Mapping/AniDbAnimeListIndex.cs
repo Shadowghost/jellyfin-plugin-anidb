@@ -197,15 +197,17 @@ internal sealed class AniDbAnimeListIndex
     /// <returns>The segments, in the order the season's episodes run through them.</returns>
     public static IReadOnlyList<AniDbSeasonSegment> Place(IReadOnlyList<AniDbAnimeListEntry> siblings, int seasonNumber)
     {
-        var claims = new List<AniDbSeasonSegment>();
+        var claims = new Dictionary<AniDbEpisodeKind, List<AniDbSeasonSegment>>();
 
         foreach (var entry in siblings)
         {
-            var placed = false;
+            // Which of the season's episodes this entry's rules account for. What is left over
+            // is what the season the entry names is for.
+            var named = new HashSet<int>();
 
             foreach (var mapping in entry.Mappings)
             {
-                if (mapping.TvdbSeason != seasonNumber || mapping.AnidbSeason == 0)
+                if (mapping.TvdbSeason != seasonNumber)
                 {
                     continue;
                 }
@@ -216,11 +218,15 @@ internal sealed class AniDbAnimeListIndex
                 foreach (var pair in mapping.Pairs)
                 {
                     // A season number of 0 says the episode has no counterpart there.
-                    if (pair.Value > 0)
+                    if (pair.Value <= 0)
                     {
-                        claims.Add(new AniDbSeasonSegment(entry.AnimeId, pair.Value, 1, pair.Key));
-                        placed = true;
+                        continue;
                     }
+
+                    var (kind, number) = Source(mapping, pair.Key);
+
+                    SeasonSegments.Add(claims, new AniDbSeasonSegment(entry.AnimeId, pair.Value, 1, number, kind));
+                    named.Add(pair.Value);
                 }
 
                 if (mapping.Start is not { } start || mapping.End < start)
@@ -232,31 +238,57 @@ internal sealed class AniDbAnimeListIndex
                 // the season now airing, whose last episode nobody knows yet, and dropping such
                 // a rule left that season with no placement at all.
                 var count = mapping.End is { } end ? end - start + 1 : 0;
+                var first = start + mapping.Offset;
+                var source = Source(mapping, start);
 
-                claims.Add(new AniDbSeasonSegment(entry.AnimeId, start + mapping.Offset, count, start));
-                placed = true;
+                SeasonSegments.Add(claims, new AniDbSeasonSegment(entry.AnimeId, first, count, source.Number, source.Kind));
+
+                named.Add(first);
+
+                for (var offset = 1; offset < count; offset++)
+                {
+                    named.Add(first + offset);
+                }
             }
 
-            // The season an entry names is where the rest of it goes, unless a rule above has
-            // already placed part of it in this same season.
-            if (!placed
-                && int.TryParse(entry.DefaultSeason, CultureInfo.InvariantCulture, out var defaultSeason)
-                && defaultSeason == seasonNumber)
+            if (!int.TryParse(entry.DefaultSeason, CultureInfo.InvariantCulture, out var defaultSeason)
+                || defaultSeason != seasonNumber)
             {
-                // The list does not say how long an entry is, so the claim runs to the end of
-                // the season. It stops early only where a rule hands the rest of the entry to
-                // another season, as a series split across two of them does.
-                var handedOver = entry.Mappings
-                    .Where(mapping => mapping.TvdbSeason != seasonNumber && mapping.AnidbSeason != 0 && mapping.Start.HasValue)
-                    .Select(mapping => mapping.Start!.Value)
-                    .DefaultIfEmpty(0)
-                    .Min();
-
-                claims.Add(new AniDbSeasonSegment(entry.AnimeId, entry.EpisodeOffset + 1, Math.Max(handedOver - 1, 0), 1));
+                continue;
             }
+
+            var startsAt = entry.EpisodeOffset + 1;
+
+            // A rule already names the episode the rest of the entry would begin at, so the
+            // rules are the whole of what this entry gives the season.
+            if (named.Contains(startsAt))
+            {
+                continue;
+            }
+
+            // The list does not say how long an entry is, so the claim runs to the end of the
+            // season. It stops early where a rule hands the rest of the entry to another season,
+            // as a series split across two of them does, and where a rule names a later episode
+            // of this season: K-On!'s first season is the entry's twelve episodes and then two
+            // of its specials, so the twelve stop where the specials begin.
+            var handedOver = entry.Mappings
+                .Where(mapping => mapping.TvdbSeason != seasonNumber && mapping.AnidbSeason != 0 && mapping.Start.HasValue)
+                .Select(mapping => mapping.Start!.Value)
+                .DefaultIfEmpty(0)
+                .Min();
+
+            var nextNamed = named.Where(episode => episode > startsAt).DefaultIfEmpty(0).Min();
+
+            SeasonSegments.Add(
+                claims,
+                new AniDbSeasonSegment(
+                    entry.AnimeId,
+                    startsAt,
+                    nextNamed > 0 ? nextNamed - startsAt : Math.Max(handedOver - 1, 0),
+                    1));
         }
 
-        return SeasonSegments.Order(claims);
+        return SeasonSegments.Resolve(claims);
     }
 
     /// <summary>
@@ -282,7 +314,9 @@ internal sealed class AniDbAnimeListIndex
                     // A season number of 0 says the episode has no counterpart to name.
                     if (pair.Value == episodeNumber && pair.Value != 0)
                     {
-                        return new AniDbAnimeListEpisode(entry.AnimeId, pair.Key, KindOf(mapping));
+                        var (pairKind, pairNumber) = Source(mapping, pair.Key);
+
+                        return new AniDbAnimeListEpisode(entry.AnimeId, pairNumber, pairKind);
                     }
                 }
 
@@ -292,7 +326,9 @@ internal sealed class AniDbAnimeListIndex
 
                     if (number >= start && number <= (mapping.End ?? int.MaxValue))
                     {
-                        return new AniDbAnimeListEpisode(entry.AnimeId, number, KindOf(mapping));
+                        var source = Source(mapping, number);
+
+                        return new AniDbAnimeListEpisode(entry.AnimeId, source.Number, source.Kind);
                     }
                 }
             }
@@ -321,19 +357,28 @@ internal sealed class AniDbAnimeListIndex
     }
 
     /// <summary>
-    /// Which of an entry's numberings a rule reads from. The list writes the type as a season
-    /// of its own: 0 for the specials, where AniDB's other episodes are numbered from 401.
+    /// Which of an entry's numberings a rule reads a given episode from, and that episode's
+    /// number within it.
     /// </summary>
+    /// <remarks>
+    /// The list writes the numbering as a season of its own: 0 for everything that is not an
+    /// ordinary episode, within which the specials are numbered from 1 and AniDB's other
+    /// episodes from 401. The band therefore belongs to each number a rule names rather than to
+    /// the rule, one rule of Owarimonogatari (2017) naming 402 through 409.
+    /// </remarks>
     /// <param name="mapping">The rule.</param>
-    /// <returns>The kind.</returns>
-    private static AniDbEpisodeKind KindOf(AniDbAnimeListMapping mapping)
+    /// <param name="number">The number the rule names on the entry's side.</param>
+    /// <returns>The numbering and the number within it.</returns>
+    private static (AniDbEpisodeKind Kind, int Number) Source(AniDbAnimeListMapping mapping, int number)
     {
         if (mapping.AnidbSeason != 0)
         {
-            return AniDbEpisodeKind.Regular;
+            return (AniDbEpisodeKind.Regular, number);
         }
 
-        return (mapping.Start ?? 0) >= OtherEpisodeBand ? AniDbEpisodeKind.Other : AniDbEpisodeKind.Special;
+        return number >= OtherEpisodeBand
+            ? (AniDbEpisodeKind.Other, number - OtherEpisodeBand)
+            : (AniDbEpisodeKind.Special, number);
     }
 
     private static AniDbAnimeListMapping? ReadMapping(XElement element)
