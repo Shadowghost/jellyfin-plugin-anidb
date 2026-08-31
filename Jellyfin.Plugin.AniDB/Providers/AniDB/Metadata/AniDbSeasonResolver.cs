@@ -340,9 +340,9 @@ internal static partial class AniDbSeasonResolver
         var layout = AniDbSeasonLayout.Read(libraryManager, seriesId);
         var placed = await PickPlacement(appPaths, seriesId, seasonNumber, layout, logger, cancellationToken).ConfigureAwait(false);
 
-        if (placed.Count > 0)
+        if (placed.Fitted.Count > 0)
         {
-            return placed;
+            return placed.Fitted;
         }
 
         var key = seriesId + "|" + (layout?.Signature ?? "-");
@@ -371,6 +371,13 @@ internal static partial class AniDbSeasonResolver
             return segments;
         }
 
+        // A placement that does not account for the season is still better than nothing, and
+        // this is where nothing is what the chain came to.
+        if (placed.Partial.Count > 0)
+        {
+            return placed.Partial;
+        }
+
         if (_reportedUnmapped.TryAdd(FormattableString.Invariant($"{key}/{seasonNumber}"), 0))
         {
             logger.LogWarning(
@@ -392,8 +399,8 @@ internal static partial class AniDbSeasonResolver
     /// <param name="layout">How the series is laid out in the library, or <c>null</c> when it cannot be seen.</param>
     /// <param name="logger">The logger of whichever provider is asking.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The segments, or empty when no source places the season or none of their placements holds up.</returns>
-    private static async Task<IReadOnlyList<AniDbSeasonSegment>> PickPlacement(
+    /// <returns>The placement that accounts for the season, and the fullest that does not.</returns>
+    private static async Task<(IReadOnlyList<AniDbSeasonSegment> Fitted, IReadOnlyList<AniDbSeasonSegment> Partial)> PickPlacement(
         IApplicationPaths appPaths,
         string seriesId,
         int seasonNumber,
@@ -405,7 +412,7 @@ internal static partial class AniDbSeasonResolver
 
         if (placements.Count == 0)
         {
-            return [];
+            return ([], []);
         }
 
         // Said once per season rather than once per episode. The placement is worked out afresh
@@ -457,22 +464,34 @@ internal static partial class AniDbSeasonResolver
 
         if (best == null)
         {
-            return [];
+            return ([], []);
         }
+
+        // A placement that leaves episodes of the season unaccounted for is not describing this
+        // library's season. Inuyasha is the case that shows why: TVDB has since merged what the
+        // sources still call its sixth and seventh seasons, so from the sixth on their numbering
+        // runs one ahead of the library's, and the season holding the Final Act is given the
+        // last eight episodes of the original series instead. Laying the chain of entries over
+        // the seasons the library actually has gets that right, so it is given the chance to,
+        // and this is kept only for where the chain comes to nothing.
+        var fits = wanted <= 0 || covered >= wanted;
 
         if (reported)
         {
-            logger.LogInformation(
-                "Season {SeasonNumber} of AniDB series {SeriesId} is filled with {Placement}, where {Source} place it",
-                seasonNumber,
-                seriesId,
-                string.Join(", ", best.Segments.Select(SeasonSegments.Describe)),
-                best.Source);
-
-            if (wanted > 0 && covered < wanted)
+            if (fits)
+            {
+                logger.LogInformation(
+                    "Season {SeasonNumber} of AniDB series {SeriesId} is filled with {Placement}, where {Source} place it",
+                    seasonNumber,
+                    seriesId,
+                    string.Join(", ", best.Segments.Select(SeasonSegments.Describe)),
+                    best.Source);
+            }
+            else
             {
                 logger.LogWarning(
-                    "That accounts for {Covered} of the {Wanted} episodes the library holds under season {SeasonNumber} of AniDB series {SeriesId}. The rest are read from the entry as though it ran on, which is right for a season still airing and wrong for one the sources describe only in part",
+                    "{Source} account for {Covered} of the {Wanted} episodes the library holds under season {SeasonNumber} of AniDB series {SeriesId}, so that placement is not used and the season is worked out from AniDB's own relations instead. The mapping file is describing a different season layout from the one the library has",
+                    best.Source,
                     covered,
                     wanted,
                     seasonNumber,
@@ -480,7 +499,7 @@ internal static partial class AniDbSeasonResolver
             }
         }
 
-        return best.Segments;
+        return fits ? (best.Segments, []) : ([], best.Segments);
     }
 
     /// <summary>
