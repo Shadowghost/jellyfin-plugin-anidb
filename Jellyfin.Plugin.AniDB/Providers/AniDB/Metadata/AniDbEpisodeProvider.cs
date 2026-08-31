@@ -143,40 +143,46 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
         // anime of its own there, with ordinary episodes.
         if (info.IndexNumber is { } specialNumber)
         {
-            var listed = await AniDbMappings.ResolveSpecial(
+            var placements = await AniDbMappings.ResolveSpecials(
                 _configurationManager.ApplicationPaths,
                 seriesId,
                 specialNumber,
                 _logger,
                 cancellationToken).ConfigureAwait(false);
 
-            if (listed != null)
+            foreach (var placed in placements)
             {
-                var listedFolder = await FindSeriesFolder(listed.AnimeId, cancellationToken).ConfigureAwait(false);
-                var listedXml = string.IsNullOrEmpty(listedFolder)
+                var placedFolder = await FindSeriesFolder(placed.AnimeId, cancellationToken).ConfigureAwait(false);
+                var placedXml = string.IsNullOrEmpty(placedFolder)
                     ? null
-                    : GetEpisodeXmlFile(listed.Number, listed.IsSpecial ? "S" : string.Empty, listedFolder);
+                    : GetEpisodeXmlFile(placed.Number, placed.IsSpecial ? "S" : string.Empty, placedFolder);
 
-                if (listedXml?.Exists == true)
+                if (placedXml?.Exists == true)
                 {
                     _logger.LogDebug(
                         "Special {EpisodeNumber} of AniDB series {SeriesId} read from {EpisodeNumberInEntry} of anime {AnimeId}, where the mapping sources place it",
                         info.IndexNumber,
                         seriesId,
-                        listed.Number,
-                        listed.AnimeId);
+                        placed.Number,
+                        placed.AnimeId);
 
-                    return listedXml;
+                    return placedXml;
                 }
+            }
 
-                _logger.LogWarning(
-                    "The anime list places special {EpisodeNumber} of AniDB series {SeriesId} at {EpisodeNumberInEntry} of anime {AnimeId}, which holds no such episode. It stays without metadata",
+            // A placement naming an episode that does not exist is not the end of the search.
+            // It means the source is wrong about this special, or the entry it names has not
+            // been fetched yet, and either way the show's own specials are still worth reading:
+            // that is how every special the sources do not place is identified.
+            if (placements.Count > 0)
+            {
+                _logger.LogDebug(
+                    "The mapping sources place special {EpisodeNumber} of AniDB series {SeriesId} at {Placement}, none of which holds such an episode, so it is matched against the show's own specials instead",
                     info.IndexNumber,
                     seriesId,
-                    listed.Number,
-                    listed.AnimeId);
-
-                return null;
+                    string.Join(
+                        ", ",
+                        placements.Select(placed => FormattableString.Invariant($"{placed.Number} of anime {placed.AnimeId}"))));
             }
         }
 

@@ -137,24 +137,45 @@ internal static class AniDbMappings
     }
 
     /// <summary>
-    /// Where the given episode of the specials season is read from.
+    /// Where the given episode of the specials season may be read from, best guess first.
     /// </summary>
+    /// <remarks>
+    /// Every source that places the episode is offered, rather than only the first, because a
+    /// placement is a claim about an entry that may not hold such an episode at all: the two
+    /// sources disagree about several hundred specials, and AniBridge alone claims some 2,300
+    /// that the anime list leaves to be matched against the show's own specials. A caller that
+    /// stopped at the first claim would lose a special the second source places correctly.
+    /// </remarks>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
     /// <param name="seriesId">The AniDB id of the series.</param>
     /// <param name="episodeNumber">The episode number within the specials season.</param>
     /// <param name="logger">The logger of whichever provider is asking.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The episode, or <c>null</c> when no source places it.</returns>
-    public static async Task<AniDbAnimeListEpisode?> ResolveSpecial(
+    /// <returns>The placements, in the order they are worth trying, or empty when no source places the episode.</returns>
+    public static async Task<IReadOnlyList<AniDbAnimeListEpisode>> ResolveSpecials(
         IApplicationPaths appPaths,
         string seriesId,
         int episodeNumber,
         ILogger logger,
         CancellationToken cancellationToken)
     {
+        var placements = new List<AniDbAnimeListEpisode>(2);
+
         var bridged = await AniBridgeMappings.ResolveSpecial(appPaths, seriesId, episodeNumber, logger, cancellationToken).ConfigureAwait(false);
 
-        return bridged ?? await AniDbAnimeList.ResolveSpecial(appPaths, seriesId, episodeNumber, logger, cancellationToken).ConfigureAwait(false);
+        if (bridged != null)
+        {
+            placements.Add(bridged);
+        }
+
+        var listed = await AniDbAnimeList.ResolveSpecial(appPaths, seriesId, episodeNumber, logger, cancellationToken).ConfigureAwait(false);
+
+        if (listed != null && !placements.Contains(listed))
+        {
+            placements.Add(listed);
+        }
+
+        return placements;
     }
 
     /// <summary>
