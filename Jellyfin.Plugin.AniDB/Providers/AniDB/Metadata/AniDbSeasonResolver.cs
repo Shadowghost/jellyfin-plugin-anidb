@@ -337,14 +337,14 @@ internal static partial class AniDbSeasonResolver
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        var placed = await PickPlacement(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
+        var layout = AniDbSeasonLayout.Read(libraryManager, seriesId);
+        var placed = await PickPlacement(appPaths, seriesId, seasonNumber, layout, logger, cancellationToken).ConfigureAwait(false);
 
         if (placed.Count > 0)
         {
             return placed;
         }
 
-        var layout = AniDbSeasonLayout.Read(libraryManager, seriesId);
         var key = seriesId + "|" + (layout?.Signature ?? "-");
 
         if (!_mappings.TryGetValue(key, out var mapping))
@@ -389,6 +389,7 @@ internal static partial class AniDbSeasonResolver
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
     /// <param name="seriesId">The AniDB id of the series.</param>
     /// <param name="seasonNumber">The season number.</param>
+    /// <param name="layout">How the series is laid out in the library, or <c>null</c> when it cannot be seen.</param>
     /// <param name="logger">The logger of whichever provider is asking.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The segments, or empty when no source places the season or none of their placements holds up.</returns>
@@ -396,6 +397,7 @@ internal static partial class AniDbSeasonResolver
         IApplicationPaths appPaths,
         string seriesId,
         int seasonNumber,
+        AniDbSeasonLayout? layout,
         ILogger logger,
         CancellationToken cancellationToken)
     {
@@ -410,40 +412,104 @@ internal static partial class AniDbSeasonResolver
         // each time, cheaply, so that a mapping file downloaded since is acted on without
         // waiting for a restart.
         var reported = _reportedPlacements.TryAdd(FormattableString.Invariant($"{seriesId}/{seasonNumber}"), 0);
+        var wanted = layout?.Seasons.FirstOrDefault(season => season.Number == seasonNumber)?.EpisodeCount ?? 0;
+
+        SeasonPlacement? best = null;
+        var covered = 0;
 
         foreach (var placement in placements)
         {
             var unheld = await FirstUnheldSegment(appPaths, placement.Segments).ConfigureAwait(false);
 
-            if (unheld == null)
+            if (unheld != null)
             {
                 if (reported)
                 {
-                    logger.LogInformation(
-                        "Season {SeasonNumber} of AniDB series {SeriesId} is filled with {Placement}, where {Source} place it",
+                    logger.LogWarning(
+                        "{Source} fill season {SeasonNumber} of AniDB series {SeriesId} from episode {EpisodeNumberInEntry} onwards of anime {AnimeId}, which AniDB records only {EpisodeCount} episodes for, so that placement is not used",
+                        placement.Source,
                         seasonNumber,
                         seriesId,
-                        string.Join(", ", placement.Segments.Select(SeasonSegments.Describe)),
-                        placement.Source);
+                        unheld.Segment.FirstEpisodeInEntry,
+                        unheld.Segment.AnimeId,
+                        unheld.EpisodeCount);
                 }
 
-                return placement.Segments;
+                continue;
             }
 
-            if (reported)
+            var reach = Reach(placement.Segments);
+
+            if (best == null || reach > covered)
             {
-                logger.LogWarning(
-                    "{Source} fill season {SeasonNumber} of AniDB series {SeriesId} from episode {EpisodeNumberInEntry} onwards of anime {AnimeId}, which AniDB records only {EpisodeCount} episodes for, so that placement is not used",
-                    placement.Source,
-                    seasonNumber,
-                    seriesId,
-                    unheld.Segment.FirstEpisodeInEntry,
-                    unheld.Segment.AnimeId,
-                    unheld.EpisodeCount);
+                best = placement;
+                covered = reach;
+            }
+
+            // Nothing beats accounting for the whole season, and where the library cannot say
+            // how long the season is there is nothing to compare by, so the first source to
+            // answer keeps its precedence.
+            if (wanted <= 0 || covered >= wanted)
+            {
+                break;
             }
         }
 
-        return [];
+        if (best == null)
+        {
+            return [];
+        }
+
+        if (reported)
+        {
+            logger.LogInformation(
+                "Season {SeasonNumber} of AniDB series {SeriesId} is filled with {Placement}, where {Source} place it",
+                seasonNumber,
+                seriesId,
+                string.Join(", ", best.Segments.Select(SeasonSegments.Describe)),
+                best.Source);
+
+            if (wanted > 0 && covered < wanted)
+            {
+                logger.LogWarning(
+                    "That accounts for {Covered} of the {Wanted} episodes the library holds under season {SeasonNumber} of AniDB series {SeriesId}. The rest are read from the entry as though it ran on, which is right for a season still airing and wrong for one the sources describe only in part",
+                    covered,
+                    wanted,
+                    seasonNumber,
+                    seriesId);
+            }
+        }
+
+        return best.Segments;
+    }
+
+    /// <summary>
+    /// How many of a season's episodes a placement accounts for.
+    /// </summary>
+    /// <remarks>
+    /// A source that describes only part of a season - AniBridge maps one episode of Ginga
+    /// Eiyuu Densetsu: Die Neue These's later seasons and leaves the other eleven to its own
+    /// scope for AniDB's other episode types, which nothing here reads - would otherwise be
+    /// preferred over one that describes all of it, its answer being neither empty nor wrong
+    /// about the episode it does name.
+    /// </remarks>
+    /// <param name="segments">The segments the placement is made of.</param>
+    /// <returns>The episode count, or <see cref="int.MaxValue"/> where a segment runs to the end of the season.</returns>
+    private static int Reach(IReadOnlyList<AniDbSeasonSegment> segments)
+    {
+        var reach = 0;
+
+        foreach (var segment in segments)
+        {
+            if (segment.EpisodeCount <= 0)
+            {
+                return int.MaxValue;
+            }
+
+            reach += segment.EpisodeCount;
+        }
+
+        return reach;
     }
 
     /// <summary>
