@@ -220,23 +220,22 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
         // lines up with nothing, and numbering straight down the list would give every special
         // after the first difference the wrong entry.
         var libraryCount = AniDbSeasonLayout.Read(_libraryManager, seriesId)?.SpecialsCount;
-        var aligned = libraryCount == specials.Count;
+        var aligned = Align(specials, libraryCount);
 
         var match = MatchById(specials, info)
             ?? MatchByTitle(specials, info)
             ?? MatchByDate(specials, info)
-            ?? (aligned ? MatchByPosition(specials, info) : null);
+            ?? (aligned == null ? null : MatchByPosition(aligned, info));
 
         if (match == null)
         {
             _logger.LogWarning(
-                "Special {EpisodeNumber} of AniDB series {SeriesId} matches none of the {SpecialCount} specials across its {EntryCount} AniDB entries by id, title or air date, so it stays without metadata. The library has {LibraryCount} specials, so they {Aligned} be numbered straight through AniDB's. Set its AniDB id by hand to fill it in",
+                "Special {EpisodeNumber} of AniDB series {SeriesId} matches none of the {SpecialCount} specials across its {EntryCount} AniDB entries by id, title or air date, so it stays without metadata. The library has {LibraryCount} specials, which line up with neither the whole of that list nor any single entry of it, so they cannot be numbered straight through. Set its AniDB id by hand to fill it in",
                 info.IndexNumber,
                 seriesId,
                 specials.Count,
                 chain.Count,
-                libraryCount,
-                aligned ? "could" : "cannot");
+                libraryCount);
 
             return null;
         }
@@ -249,6 +248,40 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
             match.AnimeId);
 
         return new FileInfo(match.Path);
+    }
+
+    /// <summary>
+    /// The specials the library's specials season can be numbered straight through, or
+    /// <c>null</c> where nothing lines up with it.
+    /// </summary>
+    /// <remarks>
+    /// The whole chain lines up where the library holds every special every entry of the show
+    /// lists. Where it does not, one entry's own specials still may: a show whose later seasons'
+    /// specials were never released, or never kept, holds exactly the specials of the entry they
+    /// belong to, and AniDB numbering them S1 upwards is the same order the library numbers them
+    /// in. Only one entry may hold that many for this to be evidence rather than a guess.
+    /// </remarks>
+    /// <param name="specials">Every special across the show's entries, in order.</param>
+    /// <param name="libraryCount">How many specials the library holds, or <c>null</c> where it cannot be read.</param>
+    /// <returns>The specials to count through, or <c>null</c>.</returns>
+    private static IReadOnlyList<AniDbSpecial>? Align(IReadOnlyList<AniDbSpecial> specials, int? libraryCount)
+    {
+        if (libraryCount is not > 0)
+        {
+            return null;
+        }
+
+        if (libraryCount == specials.Count)
+        {
+            return specials;
+        }
+
+        var entries = specials
+            .GroupBy(special => special.AnimeId, StringComparer.Ordinal)
+            .Where(entry => entry.Count() == libraryCount)
+            .ToList();
+
+        return entries.Count == 1 ? [.. entries[0].OrderBy(special => special.Number)] : null;
     }
 
     /// <summary>
