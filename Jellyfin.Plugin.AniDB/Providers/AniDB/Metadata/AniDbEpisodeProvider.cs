@@ -138,12 +138,12 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
     /// <returns>The special's document, or <c>null</c> when it cannot be identified.</returns>
     private async Task<FileInfo?> FindSpecialXml(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
     {
-        // The list is where a film that the season numbering files among the specials is
-        // recorded. Nothing about AniDB's own specials can turn one up: it is an anime of its
-        // own there, with ordinary episodes.
+        // The mapping sources are where a film that the season numbering files among the
+        // specials is recorded. Nothing about AniDB's own specials can turn one up: it is an
+        // anime of its own there, with ordinary episodes.
         if (info.IndexNumber is { } specialNumber)
         {
-            var listed = await AniDbAnimeList.ResolveSpecial(
+            var listed = await AniDbMappings.ResolveSpecial(
                 _configurationManager.ApplicationPaths,
                 seriesId,
                 specialNumber,
@@ -160,7 +160,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
                 if (listedXml?.Exists == true)
                 {
                     _logger.LogDebug(
-                        "Special {EpisodeNumber} of AniDB series {SeriesId} read from {EpisodeNumberInEntry} of anime {AnimeId}, where the anime list places it",
+                        "Special {EpisodeNumber} of AniDB series {SeriesId} read from {EpisodeNumberInEntry} of anime {AnimeId}, where the mapping sources place it",
                         info.IndexNumber,
                         seriesId,
                         listed.Number,

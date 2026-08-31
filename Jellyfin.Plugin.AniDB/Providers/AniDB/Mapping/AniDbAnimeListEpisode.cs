@@ -1,7 +1,7 @@
 namespace Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 
 /// <summary>
-/// Where a single episode is read from, once the anime list has placed it.
+/// Where a single episode is read from, once a mapping source has placed it.
 /// </summary>
 /// <param name="AnimeId">The AniDB id of the entry holding it.</param>
 /// <param name="Number">Its number within that entry.</param>

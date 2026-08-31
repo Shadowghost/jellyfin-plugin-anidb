@@ -367,31 +367,32 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     /// <returns>The AniDB id, or <c>null</c> when the show cannot be identified.</returns>
     private async Task<string?> Identify(SeriesInfo info, CancellationToken cancellationToken)
     {
-        // A TVDB id a provider ahead of this one has already settled on names the show
-        // outright, and the anime list records which AniDB entry that id is. It is tried
+        // A TVDB or TMDB id a provider ahead of this one has already settled on names the show
+        // outright, and the mapping sources record which AniDB entry that id is. It is tried
         // first because a name is the weaker evidence of the two: AniDB spells a great many
         // names differently from TVDB, and where two shows do share a name the id is the only
         // thing that tells them apart. A folder naming a season is left to the name match
         // below, because the id names the whole show and would answer with its first season.
-        var tvdbId = info.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tvdb));
-
         if (!AniDbSeasonResolver.NamesASeason(info.Name))
         {
-            var listed = await AniDbAnimeList.ResolveSeriesId(
+            var mapped = await AniDbMappings.ResolveSeriesId(
                 _appPaths,
-                tvdbId,
+                info.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tvdb)),
+                info.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tmdb)),
                 Logger ?? (ILogger)NullLogger.Instance,
                 cancellationToken).ConfigureAwait(false);
 
-            if (!string.IsNullOrEmpty(listed))
+            if (mapped != null)
             {
                 Logger?.LogInformation(
-                    "{SeriesName} is AniDB anime {AnimeId}, which the anime list files under TVDB series {TvdbId}",
+                    "{SeriesName} is AniDB anime {AnimeId}, which {Source} files under {Provider} series {ProviderId}",
                     info.Name,
-                    listed,
-                    tvdbId);
+                    mapped.AnimeId,
+                    mapped.Source,
+                    mapped.Provider,
+                    mapped.ProviderId);
 
-                return listed;
+                return mapped.AnimeId;
             }
         }
 
@@ -443,7 +444,7 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
         // it settles this for nothing, where each hop of the relation walk costs a request.
         if (!AniDbSeasonResolver.NamesASeason(searchedName))
         {
-            var listedFirst = await AniDbAnimeList.ResolveFirstSeason(
+            var listedFirst = await AniDbMappings.ResolveFirstSeason(
                 _appPaths,
                 matched,
                 Logger ?? (ILogger)NullLogger.Instance,
@@ -452,7 +453,7 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
             if (!string.IsNullOrEmpty(listedFirst))
             {
                 Logger?.LogInformation(
-                    "{SeriesName} matched AniDB anime {MatchedId}, which the anime list files as a later season. The show begins at anime {AnimeId}, which is used instead",
+                    "{SeriesName} matched AniDB anime {MatchedId}, which the mapping sources file as a later season. The show begins at anime {AnimeId}, which is used instead",
                     searchedName,
                     matched,
                     listedFirst);
@@ -515,16 +516,19 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
 
         await Offer(searchInfo.ProviderIds.GetValueOrDefault(ProviderNames.AniDb)).ConfigureAwait(false);
 
-        // The anime list is the one source here that answers with a certainty rather than a
-        // guess, so its answer goes first. It also settles the question the name cannot: it
-        // holds anime only, so a TVDB id it does not carry belongs to something that is not an
-        // anime - a live action adaptation sharing the show's name, most often - and a TVDB id
-        // it does carry names the AniDB entry outright.
-        await Offer(await AniDbAnimeList.ResolveSeriesId(
+        // The mapping sources are the ones here that answer with a certainty rather than a
+        // guess, so their answer goes first. They also settle the question the name cannot: they
+        // hold anime only, so an id they do not carry belongs to something that is not an
+        // anime - a live action adaptation sharing the show's name, most often - and an id they
+        // do carry names the AniDB entry outright.
+        var mapped = await AniDbMappings.ResolveSeriesId(
             _appPaths,
             searchInfo.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tvdb)),
+            searchInfo.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tmdb)),
             Logger ?? (ILogger)NullLogger.Instance,
-            cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
+            cancellationToken).ConfigureAwait(false);
+
+        await Offer(mapped?.AnimeId).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(searchInfo.Name))
         {
