@@ -529,6 +529,13 @@ internal static partial class AniDbSeasonResolver
     {
         foreach (var segment in segments)
         {
+            // AniDB counts an entry's ordinary episodes and nothing else, so a segment reading
+            // from another of its numberings has nothing here to be checked against.
+            if (segment.Kind != AniDbEpisodeKind.Regular)
+            {
+                continue;
+            }
+
             var episodeCount = await GetCachedEpisodeCount(appPaths, segment.AnimeId).ConfigureAwait(false);
 
             // Nothing on disk to check against. AniDB also counts an anime still airing as the

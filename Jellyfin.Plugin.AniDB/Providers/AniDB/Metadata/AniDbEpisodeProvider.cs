@@ -88,7 +88,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
 
     private async Task<FileInfo?> FindEpisodeXml(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
     {
-        var (animeId, numberInEntry) = await GetEpisodeSource(info, seriesId, cancellationToken).ConfigureAwait(false);
+        var (animeId, numberInEntry, kind) = await GetEpisodeSource(info, seriesId, cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrEmpty(animeId) || numberInEntry is null)
         {
             return null;
@@ -100,7 +100,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
             return null;
         }
 
-        var xml = GetEpisodeXmlFile(numberInEntry, string.Empty, seriesFolder);
+        var xml = GetEpisodeXmlFile(numberInEntry, kind.Prefix(), seriesFolder);
 
         if (xml == null || !xml.Exists)
         {
@@ -155,7 +155,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
                 var placedFolder = await FindSeriesFolder(placed.AnimeId, cancellationToken).ConfigureAwait(false);
                 var placedXml = string.IsNullOrEmpty(placedFolder)
                     ? null
-                    : GetEpisodeXmlFile(placed.Number, placed.IsSpecial ? "S" : string.Empty, placedFolder);
+                    : GetEpisodeXmlFile(placed.Number, placed.Kind.Prefix(), placedFolder);
 
                 if (placedXml?.Exists == true)
                 {
@@ -342,11 +342,11 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
     /// <param name="seriesId">The AniDB id of the series.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The entry and the episode's number in it, or nulls when neither can be identified.</returns>
-    private async Task<(string? AnimeId, int? NumberInEntry)> GetEpisodeSource(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
+    private async Task<(string? AnimeId, int? NumberInEntry, AniDbEpisodeKind Kind)> GetEpisodeSource(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
     {
         if (info.IndexNumber is not { } episodeNumber)
         {
-            return (null, null);
+            return (null, null, AniDbEpisodeKind.Regular);
         }
 
         // Every AniDB anime numbers its episodes from one, so an episode can only be looked up
@@ -354,7 +354,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
         // them in the entry they belong to, under their own numbering.
         if (Plugin.Instance.Configuration.IgnoreSeason || info.ParentIndexNumber is null or <= 0)
         {
-            return (seriesId, episodeNumber);
+            return (seriesId, episodeNumber, AniDbEpisodeKind.Regular);
         }
 
         var segments = await AniDbSeasonResolver.ResolveSeasonSegments(
@@ -372,17 +372,17 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
         if (!string.IsNullOrEmpty(seasonId)
             && (segments == null || !string.Equals(seasonId, segments[0].AnimeId, StringComparison.Ordinal)))
         {
-            return (seasonId, episodeNumber);
+            return (seasonId, episodeNumber, AniDbEpisodeKind.Regular);
         }
 
         if (segments == null)
         {
-            return (null, null);
+            return (null, null, AniDbEpisodeKind.Regular);
         }
 
         var segment = AniDbSeasonResolver.PickSegment(segments, episodeNumber);
 
-        return (segment.AnimeId, segment.FirstEpisodeInEntry + (episodeNumber - segment.FirstEpisodeNumber));
+        return (segment.AnimeId, segment.FirstEpisodeInEntry + (episodeNumber - segment.FirstEpisodeNumber), segment.Kind);
     }
 
     private async Task<string?> FindSeriesFolder(string seriesId, CancellationToken cancellationToken)

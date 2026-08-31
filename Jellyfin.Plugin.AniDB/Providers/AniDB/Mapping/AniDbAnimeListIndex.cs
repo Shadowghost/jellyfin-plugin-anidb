@@ -14,6 +14,11 @@ namespace Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 /// </summary>
 internal sealed class AniDbAnimeListIndex
 {
+    /// <summary>
+    /// Where AniDB's other episodes begin in the numbering the list writes the specials in.
+    /// </summary>
+    private const int OtherEpisodeBand = 400;
+
     private readonly IReadOnlyDictionary<string, AniDbAnimeListEntry> _byAnimeId;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<AniDbAnimeListEntry>> _bySeries;
 
@@ -277,7 +282,7 @@ internal sealed class AniDbAnimeListIndex
                     // A season number of 0 says the episode has no counterpart to name.
                     if (pair.Value == episodeNumber && pair.Value != 0)
                     {
-                        return new AniDbAnimeListEpisode(entry.AnimeId, pair.Key, mapping.AnidbSeason == 0);
+                        return new AniDbAnimeListEpisode(entry.AnimeId, pair.Key, KindOf(mapping));
                     }
                 }
 
@@ -287,7 +292,7 @@ internal sealed class AniDbAnimeListIndex
 
                     if (number >= start && number <= (mapping.End ?? int.MaxValue))
                     {
-                        return new AniDbAnimeListEpisode(entry.AnimeId, number, mapping.AnidbSeason == 0);
+                        return new AniDbAnimeListEpisode(entry.AnimeId, number, KindOf(mapping));
                     }
                 }
             }
@@ -312,7 +317,23 @@ internal sealed class AniDbAnimeListIndex
             }
         }
 
-        return holder == null ? null : new AniDbAnimeListEpisode(holder.AnimeId, episodeNumber - holder.EpisodeOffset, false);
+        return holder == null ? null : new AniDbAnimeListEpisode(holder.AnimeId, episodeNumber - holder.EpisodeOffset, AniDbEpisodeKind.Regular);
+    }
+
+    /// <summary>
+    /// Which of an entry's numberings a rule reads from. The list writes the type as a season
+    /// of its own: 0 for the specials, where AniDB's other episodes are numbered from 401.
+    /// </summary>
+    /// <param name="mapping">The rule.</param>
+    /// <returns>The kind.</returns>
+    private static AniDbEpisodeKind KindOf(AniDbAnimeListMapping mapping)
+    {
+        if (mapping.AnidbSeason != 0)
+        {
+            return AniDbEpisodeKind.Regular;
+        }
+
+        return (mapping.Start ?? 0) >= OtherEpisodeBand ? AniDbEpisodeKind.Other : AniDbEpisodeKind.Special;
     }
 
     private static AniDbAnimeListMapping? ReadMapping(XElement element)

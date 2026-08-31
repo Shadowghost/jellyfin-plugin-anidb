@@ -1,3 +1,5 @@
+using Jellyfin.Plugin.AniDB.Providers.AniDB.Metadata;
+
 namespace Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 
 /// <summary>
@@ -8,5 +10,5 @@ namespace Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 /// <param name="Season">The season the run fills, or 0 for the specials.</param>
 /// <param name="InEntry">The episodes of the entry the run covers.</param>
 /// <param name="InSeason">The episodes of the season they fill.</param>
-/// <param name="IsSpecialInEntry">Whether <paramref name="InEntry"/> numbers the entry's specials rather than its ordinary episodes.</param>
-internal sealed record AniBridgeSpan(int Season, AniBridgeRange InEntry, AniBridgeRange InSeason, bool IsSpecialInEntry);
+/// <param name="Kind">Which of the entry's episode numberings <paramref name="InEntry"/> counts.</param>
+internal sealed record AniBridgeSpan(int Season, AniBridgeRange InEntry, AniBridgeRange InSeason, AniDbEpisodeKind Kind);

@@ -22,6 +22,11 @@ internal sealed class AniBridgeIndex
     /// </summary>
     private const string SchemaMajorVersion = "3";
 
+    /// <summary>
+    /// Where AniDB's other episodes begin in the single numbering the specials scope uses.
+    /// </summary>
+    private const int OtherEpisodeBand = 400;
+
     private readonly IReadOnlyDictionary<string, AniBridgeEntry> _byAnimeId;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<AniBridgeEntry>> _bySeries;
     private readonly IReadOnlyDictionary<string, string> _firstSeasonByTmdb;
@@ -100,9 +105,9 @@ internal sealed class AniBridgeIndex
 
             reader.Read();
 
-            if (TryReadScope(descriptor, out var animeId, out var isSpecialScope))
+            if (TryReadScope(descriptor, out var animeId, out var kind))
             {
-                ReadTargets(ref reader, animeId, isSpecialScope, spans, seriesKeys, tmdbCandidates);
+                ReadTargets(ref reader, animeId, kind, spans, seriesKeys, tmdbCandidates);
             }
             else
             {
@@ -145,25 +150,48 @@ internal sealed class AniBridgeIndex
     /// <returns>The segments, in the order the season's episodes run through them.</returns>
     public static IReadOnlyList<AniDbSeasonSegment> Place(IReadOnlyList<AniBridgeEntry> siblings, int seasonNumber)
     {
-        var claims = new List<AniDbSeasonSegment>();
+        // Kept apart because one entry can describe the same season under two of its own
+        // numberings: anime 13473 maps a single ordinary episode onto season 2 and all twelve of
+        // its other episodes onto the same twelve, the season being three films that the season
+        // numbering breaks into television episodes. Mixing the two would leave the season
+        // claimed twice over, so the fuller numbering is taken whole and the other dropped.
+        var claims = new Dictionary<AniDbEpisodeKind, List<AniDbSeasonSegment>>();
 
         foreach (var entry in siblings)
         {
             foreach (var span in entry.Spans)
             {
                 // A span of an entry's specials cannot be described as part of an ordinary
-                // season: what fills it would be read from the entry's specials rather than
-                // its episodes, which a segment has no way of saying.
-                if (span.Season != seasonNumber || span.IsSpecialInEntry)
+                // season: a season filled from them would have to be read from the entry's
+                // specials, and that is what the specials season is for.
+                if (span.Season != seasonNumber || span.Kind == AniDbEpisodeKind.Special)
                 {
                     continue;
                 }
 
-                claims.Add(new AniDbSeasonSegment(entry.AnimeId, span.InSeason.Start, CountOf(span), span.InEntry.Start));
+                if (!claims.TryGetValue(span.Kind, out var byKind))
+                {
+                    byKind = [];
+                    claims[span.Kind] = byKind;
+                }
+
+                byKind.Add(new AniDbSeasonSegment(entry.AnimeId, span.InSeason.Start, CountOf(span), span.InEntry.Start, span.Kind));
             }
         }
 
-        return SeasonSegments.Order(claims);
+        if (claims.Count == 0)
+        {
+            return [];
+        }
+
+        // Ordinary episodes win a tie: they are what almost every season is filled from, and
+        // what the rest of the plugin reads without being told.
+        var fullest = claims
+            .OrderByDescending(pair => pair.Value.Sum(segment => segment.EpisodeCount == 0 ? int.MaxValue : segment.EpisodeCount))
+            .ThenBy(pair => pair.Key == AniDbEpisodeKind.Regular ? 0 : 1)
+            .First();
+
+        return SeasonSegments.Order(fullest.Value);
     }
 
     /// <summary>
@@ -262,7 +290,7 @@ internal sealed class AniBridgeIndex
         return new AniDbAnimeListEpisode(
             holder.AnimeId,
             narrowest.InEntry.Start + (episodeNumber - narrowest.InSeason.Start),
-            narrowest.IsSpecialInEntry);
+            narrowest.Kind);
     }
 
     /// <summary>
@@ -324,7 +352,7 @@ internal sealed class AniBridgeIndex
 
         foreach (var span in entry.Spans)
         {
-            if (span.Season < 1 || span.IsSpecialInEntry)
+            if (span.Season < 1 || span.Kind == AniDbEpisodeKind.Special)
             {
                 continue;
             }
@@ -425,7 +453,7 @@ internal sealed class AniBridgeIndex
     private static void ReadTargets(
         ref Utf8JsonReader reader,
         string animeId,
-        bool isSpecialScope,
+        AniDbEpisodeKind kind,
         Dictionary<string, List<AniBridgeSpan>> spans,
         Dictionary<string, string> seriesKeys,
         Dictionary<string, List<SeasonClaim>> tmdbCandidates)
@@ -463,11 +491,11 @@ internal sealed class AniBridgeIndex
 
             if (isTvdb)
             {
-                ReadRanges(ref reader, animeId, isSpecialScope, showId, season, spans, seriesKeys);
+                ReadRanges(ref reader, animeId, kind, showId, season, spans, seriesKeys);
             }
             else
             {
-                ReadTmdbClaim(ref reader, animeId, isSpecialScope, showId, season, tmdbCandidates);
+                ReadTmdbClaim(ref reader, animeId, kind, showId, season, tmdbCandidates);
             }
         }
     }
@@ -475,7 +503,7 @@ internal sealed class AniBridgeIndex
     private static void ReadRanges(
         ref Utf8JsonReader reader,
         string animeId,
-        bool isSpecialScope,
+        AniDbEpisodeKind kind,
         string showId,
         int season,
         Dictionary<string, List<AniBridgeSpan>> spans,
@@ -501,7 +529,7 @@ internal sealed class AniBridgeIndex
                 reader.Skip();
             }
 
-            if (inEntry == null || inSeason == null)
+            if (inEntry == null || inSeason == null || ReadBand(kind, inEntry) is not { } banded)
             {
                 continue;
             }
@@ -516,14 +544,21 @@ internal sealed class AniBridgeIndex
                 spans[animeId] = list;
             }
 
-            list.Add(new AniBridgeSpan(season, inEntry, inSeason, isSpecialScope));
+            var span = new AniBridgeSpan(season, banded.InEntry, inSeason, banded.Kind);
+
+            // The specials and other scopes of one entry say the same thing twice once the band
+            // above is read for what it is.
+            if (!list.Contains(span))
+            {
+                list.Add(span);
+            }
         }
     }
 
     private static void ReadTmdbClaim(
         ref Utf8JsonReader reader,
         string animeId,
-        bool isSpecialScope,
+        AniDbEpisodeKind kind,
         string showId,
         int season,
         Dictionary<string, List<SeasonClaim>> tmdbCandidates)
@@ -552,7 +587,7 @@ internal sealed class AniBridgeIndex
             }
         }
 
-        if (isSpecialScope || season < 1 || earliest == int.MaxValue)
+        if (kind != AniDbEpisodeKind.Regular || season < 1 || earliest == int.MaxValue)
         {
             return;
         }
@@ -571,12 +606,12 @@ internal sealed class AniBridgeIndex
     /// </summary>
     /// <param name="descriptor">The descriptor as written.</param>
     /// <param name="animeId">The AniDB id.</param>
-    /// <param name="isSpecialScope">Whether the scope numbers the entry's specials.</param>
+    /// <param name="kind">Which of the entry's numberings the scope counts.</param>
     /// <returns><c>true</c> where the descriptor names a scope this reads.</returns>
-    private static bool TryReadScope(string descriptor, out string animeId, out bool isSpecialScope)
+    private static bool TryReadScope(string descriptor, out string animeId, out AniDbEpisodeKind kind)
     {
         animeId = string.Empty;
-        isSpecialScope = false;
+        kind = AniDbEpisodeKind.Regular;
 
         var parts = descriptor.Split(':');
 
@@ -585,15 +620,17 @@ internal sealed class AniBridgeIndex
             return false;
         }
 
-        // "R" numbers the entry's ordinary episodes and "S" its specials. The rest are AniDB's
-        // other episode types - credits, trailers, parodies and the like - which a handful of
-        // entries are mapped by and which name no file the episode provider reads.
+        // "R" numbers the entry's ordinary episodes, "S" its specials and "O" its other
+        // episodes. Anything else is a scope this does not read.
         switch (parts[2])
         {
             case "R":
                 break;
             case "S":
-                isSpecialScope = true;
+                kind = AniDbEpisodeKind.Special;
+                break;
+            case "O":
+                kind = AniDbEpisodeKind.Other;
                 break;
             default:
                 return false;
@@ -602,6 +639,37 @@ internal sealed class AniBridgeIndex
         animeId = parts[1];
 
         return true;
+    }
+
+    /// <summary>
+    /// Rewrites a span of the specials scope that is really one of the other episodes.
+    /// </summary>
+    /// <remarks>
+    /// The specials scope numbers every episode that is not an ordinary one in a single run,
+    /// AniDB's type deciding where in it a number falls: specials from 1, and the other
+    /// episodes from 401. Every number in the set is in one band or the other, and where an
+    /// entry carries both scopes they say the same thing twice - anime 13473's specials scope
+    /// maps 401-412 onto the same season episodes its other scope maps 1-12 onto - so reading
+    /// the band as what it is makes the two agree instead of compete, and gives the six entries
+    /// that carry only the specials scope an answer that names a document on disk.
+    /// </remarks>
+    /// <param name="kind">The kind the scope named.</param>
+    /// <param name="inEntry">The episodes of the entry the span covers.</param>
+    /// <returns>The kind and range to record, or <c>null</c> where the range falls in neither band.</returns>
+    private static (AniDbEpisodeKind Kind, AniBridgeRange InEntry)? ReadBand(AniDbEpisodeKind kind, AniBridgeRange inEntry)
+    {
+        if (kind != AniDbEpisodeKind.Special || inEntry.Start < OtherEpisodeBand)
+        {
+            // A special numbered into a later band alongside one that is not cannot be read as
+            // either, and no such span exists in the set.
+            return inEntry.End >= OtherEpisodeBand && kind == AniDbEpisodeKind.Special
+                ? null
+                : (kind, inEntry);
+        }
+
+        return (
+            AniDbEpisodeKind.Other,
+            new AniBridgeRange(inEntry.Start - OtherEpisodeBand, inEntry.End is { } end ? end - OtherEpisodeBand : null));
     }
 
     /// <summary>
