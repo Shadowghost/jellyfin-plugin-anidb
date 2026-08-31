@@ -200,11 +200,25 @@ internal sealed class AniDbAnimeListIndex
 
             foreach (var mapping in entry.Mappings)
             {
-                // A rule naming episodes one by one places specials, not a run of a season.
-                if (mapping.TvdbSeason != seasonNumber
-                    || mapping.AnidbSeason == 0
-                    || mapping.Start is not { } start
-                    || mapping.End < start)
+                if (mapping.TvdbSeason != seasonNumber || mapping.AnidbSeason == 0)
+                {
+                    continue;
+                }
+
+                // A rule may name the season's episodes one by one rather than as a run, which
+                // is how a season whose episodes do not correspond one to one with the entry's
+                // is written. Each named episode is a segment of its own, one episode long.
+                foreach (var pair in mapping.Pairs)
+                {
+                    // A season number of 0 says the episode has no counterpart there.
+                    if (pair.Value > 0)
+                    {
+                        claims.Add(new AniDbSeasonSegment(entry.AnimeId, pair.Value, 1, pair.Key));
+                        placed = true;
+                    }
+                }
+
+                if (mapping.Start is not { } start || mapping.End < start)
                 {
                     continue;
                 }
@@ -314,11 +328,23 @@ internal sealed class AniDbAnimeListIndex
         {
             var separator = pair.IndexOf('-', StringComparison.Ordinal);
 
-            if (separator > 0
-                && int.TryParse(pair[..separator], CultureInfo.InvariantCulture, out var inEntry)
-                && int.TryParse(pair[(separator + 1)..], CultureInfo.InvariantCulture, out var inSeason))
+            if (separator <= 0 || !int.TryParse(pair[..separator], CultureInfo.InvariantCulture, out var inEntry))
             {
-                pairs.Add(new KeyValuePair<int, int>(inEntry, inSeason));
+                continue;
+            }
+
+            // One episode of the entry can fill several of the season's, written "1-1+2+3".
+            // That is a film the season numbering breaks into three episodes, as every season
+            // of Ginga Eiyuu Densetsu: Die Neue These past the first is. Reading only up to the
+            // plus left the whole rule unparsed, and the season was then placed as though the
+            // two sides ran one to one, which sent every episode past the first film's to an
+            // episode of the entry that does not exist.
+            foreach (var inSeason in pair[(separator + 1)..].Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (int.TryParse(inSeason, CultureInfo.InvariantCulture, out var number))
+                {
+                    pairs.Add(new KeyValuePair<int, int>(inEntry, number));
+                }
             }
         }
 
