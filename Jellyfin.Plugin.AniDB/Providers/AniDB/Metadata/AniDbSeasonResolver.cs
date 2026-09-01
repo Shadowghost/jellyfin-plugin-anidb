@@ -1464,7 +1464,18 @@ internal static partial class AniDbSeasonResolver
     /// <summary>
     /// A season number, as it is written at the end of a folder name.
     /// </summary>
-    [GeneratedRegex(@"(\b(season|staffel|part|series|stage|cour)\s*\d+|\b\d+(st|nd|rd|th)\s+(season|staffel|part|series|stage|cour)|\b\d+\.\s*(season|staffel|part|series|stage|cour)|\b(final\s+(season|act|chapter))|\bkanketsuhen|\s(II|III|IV|V|VI|VII|VIII|IX|X))\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    /// <remarks>
+    /// The Roman numeral is the one part matched as written, case and all, because a romanized
+    /// Japanese title ends in those same letters as words of its own: "Raise wa Tanin ga Ii"
+    /// ends in "Ii", which read case-insensitively is season two. A numeral is written in
+    /// capitals wherever it means a number, so requiring them costs nothing.
+    /// <para>
+    /// A lone V or X is left out altogether. Either can end a title as a letter - "Nazo no
+    /// Kanojo X", "After War Gundam X" - where no title reaches a fifth or tenth season
+    /// written as a numeral rather than a number.
+    /// </para>
+    /// </remarks>
+    [GeneratedRegex(@"(\b(season|staffel|part|series|stage|cour)\s*\d+|\b\d+(st|nd|rd|th)\s+(season|staffel|part|series|stage|cour)|\b\d+\.\s*(season|staffel|part|series|stage|cour)|\b(final\s+(season|act|chapter))|\bkanketsuhen|(?-i:\s(II|III|IV|VI|VII|VIII|IX)))\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SeasonMarkerRegex();
 
     /// <summary>
