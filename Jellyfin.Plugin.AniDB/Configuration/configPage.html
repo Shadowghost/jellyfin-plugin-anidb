@@ -11,6 +11,7 @@
                 <div class="content-primary">
                     <style>
                         .anidbNotice { border-left: 0.25em solid #cb272a; padding: 0.6em 1em; margin: 0 0 1.5em 0; background: rgba(203, 39, 42, 0.08); }
+                        .anidbInfo {  border-left-color: #2256f2; background: #276fcb14;}
                         .anidbNotice h3 { margin: 0 0 0.4em 0; }
                         .anidbNotice p { margin: 0.4em 0; }
                         .anidbStatus { border: 0.075em solid rgba(127, 127, 127, 0.4); border-radius: 0.25em; padding: 0.6em 1em; margin: 0 0 1.5em 0; }
@@ -24,9 +25,9 @@
                         /* Grows with what is typed into it, rather than scrolling a fixed four rows. */
                         .anidbTextarea { width: 100%; box-sizing: border-box; font-size: 1rem; line-height: 1.4375em; field-sizing: content; min-height: 8em; }
                     </style>
-
+                    <h1>AniDB</h1>
                     <div class="anidbNotice">
-                        <h3>AniDB bans servers that ask too often</h3>
+                        <h3>AniDB bans clients/IPs/VPNs that send to many requests</h3>
                         <p>AniDB allows one request every few seconds from an IP address and bans one that goes past that, for anything from 15 minutes to a day. The ban is on your address, not on this plugin, so it also stops anything else on the same connection from reaching AniDB.</p>
                         <p>The first scan of a library is where this is most likely: it asks about every show at once. The plugin paces its requests, waits a ban out rather than retrying into it, and keeps using what it has already cached, so a ban costs you missing metadata for a while rather than anything permanent - refresh those items once it has lifted. It is worth scanning a handful of shows first and letting the rest follow.</p>
                         <p>Do not lower <em>Maximum Cache Age</em> or <em>Request Interval</em> below their defaults, and raise the interval if anything else on this address talks to AniDB. If a scan seems to have stalled, check the status below before restarting anything: restarting does not clear a ban.</p>
@@ -59,7 +60,7 @@
                             <input id="chkTitleSimilarityThreshold" name="chkTitleSimilarityThreshold" type="number" is="emby-input" min="0" />
                             <div class="fieldDescription">Set this to zero to only automatically match if the title of the show is exactly the same. A value of one means that one character can be inserted or deleted.</div>
                         </div>
-                        <div class="inputContainer">
+                        <div class="anidbNotice anidbInfo">
                             <div class="fieldDescription">AniDB has no seasons: each one is a separate anime entry, and how those divide up is not how the provider numbering your seasons divides them. One entry can be four seasons of a long-running show, a season can end part way into one entry and finish in the next, and a film can sit among the specials. Which entry fills which season is therefore read from the community anime list, downloaded from GitHub once a week and kept in the plugin's cache. A show the list does not carry falls back to working the mapping out from AniDB's own relations and air dates.</div>
                         </div>
                         <div class="checkboxContainer checkboxContainer-withDescription">
@@ -79,16 +80,16 @@
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
                                 <input id="chkUseAniDbSeasonNames" name="chkUseAniDbSeasonNames" type="checkbox" is="emby-checkbox" />
-                                <span>Name Seasons After Their AniDB Entry</span>
+                                <span>Name Seasons after their AniDB entry</span>
                             </label>
-                            <div class="fieldDescription">AniDB gives every season of a show its own entry, with its own title. If checked, a season is named after the entry it was filled from. Uncheck to keep the plain "Season 2" naming that the other metadata providers leave behind.</div>
+                            <div class="fieldDescription">AniDB gives every season of a show its own entry, with its own title. Arcs usually prefixed with anime title and to long for season overview. If checked, a season is named after the entry it was filled from. Uncheck to keep the plain "Season 2" naming that the other metadata providers leave behind.</div>
                         </div>
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
                                 <input id="chkImportGenres" name="chkImportGenres" type="checkbox" is="emby-checkbox" />
                                 <span>Import Genres</span>
                             </label>
-                            <div class="fieldDescription">Uncheck to take no genres from AniDB at all, leaving the genre list to whichever other provider fills it. AniDB derives genres from its tags, which are far more specific than a genre list usually is.</div>
+                            <div class="fieldDescription">Uncheck to take no genres from AniDB at all, leaving the genre list to whichever other provider fills it. AniDB derives genres from its tags, and not standard comform to over providers.</div>
                         </div>
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
@@ -119,7 +120,7 @@
                         <div class="inputContainer">
                             <label class="inputeLabel inputLabelUnfocused" for="chkMinimumTagWeight">Minimum Tag Weight</label>
                             <input id="chkMinimumTagWeight" name="chkMinimumTagWeight" type="number" is="emby-input" min="0" />
-                            <div class="fieldDescription">AniDB weights every tag by how much of the show it describes. Tags below this weight are dropped, tags and genres alike. 400 is where AniDB itself stops treating a tag as descriptive; raise it to keep only what characterises the show.</div>
+                            <div class="fieldDescription">AniDB weights every tag by how much of the show it describes. Tags below this weight are dropped, tags and genres alike. 400 is where AniDB itself stops treating a tag as descriptive; raise it to keep only what characterises the show.  <a targte="_blank" href="https://wiki.anidb.net/Tags#Star-rating_-_the_Weight_system">Tag weight on anidb.net</a> (0-600 in 100 increments)</div>
                         </div>
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
@@ -156,7 +157,7 @@
                         <div class="inputContainer">
                             <label class="inputeLabel inputLabelUnfocused" for="chkRequestIntervalMs">Request Interval (ms)</label>
                             <input id="chkRequestIntervalMs" name="chkRequestIntervalMs" type="number" is="emby-input" min="2500" step="100" />
-                            <div class="fieldDescription">How long to wait between two AniDB requests. Minimum 2500 ms, which is what AniDB itself allows. AniDB counts requests per IP rather than per client, so raise this if anything else on the same address talks to AniDB as well.</div>
+                            <div class="fieldDescription">How long to wait between two AniDB requests. Minimum 2500 ms, which is what AniDB itself allows. AniDB counts requests per IP rather than per client, so raise this if anything else on the same address talks to AniDB as well. A request contains season and ffprobe needs usually most time while scanning.</div>
                         </div>
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
