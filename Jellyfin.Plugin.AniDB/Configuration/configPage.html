@@ -52,14 +52,7 @@
                                 <option id="optLanguageJapanese" value="Japanese">Japanese</option>
                                 <option id="optLanguageJapaneseRomaji" value="JapaneseRomaji">Romaji</option>
                             </select>
-                        </div>
-                        <div class="selectContainer">
-                            <label class="selectLabel" for="originalTitleLanguage">Original Title Language</label>
-                            <select is="emby-select" id="originalTitleLanguage" name="originalTitleLanguage" class="emby-select-withcolor emby-select">
-                                <option id="optLanguageLocalized" value="Localized">Localized</option>
-                                <option id="optLanguageJapanese" value="Japanese">Japanese</option>
-                                <option id="optLanguageJapaneseRomaji" value="JapaneseRomaji">Romaji</option>
-                            </select>
+                            <div class="fieldDescription">The language the displayed title is taken from, falling back to the romaji title where AniDB holds none in that language. The original title is always the Japanese one, as that is the language the anime was made in.</div>
                         </div>
                         <div class="inputContainer">
                             <label class="inputeLabel inputLabelUnfocused" for="chkTitleSimilarityThreshold">Title Similarity Threshold</label>
@@ -258,7 +251,6 @@
 
                         ApiClient.getPluginConfiguration(AniDBConfigurationPage.pluginUniqueId).then(function (config) {
                             document.getElementById('titleLanguage').value = config.TitlePreference;
-                            document.getElementById('originalTitleLanguage').value = config.OriginalTitlePreference;
                             document.getElementById('chkIgnoreSeason').checked = config.IgnoreSeason;
                             document.getElementById('chkUseAniBridgeMappings').checked = config.UseAniBridgeMappings;
                             document.getElementById('chkUseAniDbSeasonNames').checked = config.UseAniDbSeasonNames;
@@ -286,7 +278,6 @@
 
                         ApiClient.getPluginConfiguration(AniDBConfigurationPage.pluginUniqueId).then(function (config) {
                             config.TitlePreference = document.getElementById('titleLanguage').value;
-                            config.OriginalTitlePreference = document.getElementById('originalTitleLanguage').value;
                             config.IgnoreSeason = document.getElementById('chkIgnoreSeason').checked;
                             config.UseAniBridgeMappings = document.getElementById('chkUseAniBridgeMappings').checked;
                             config.UseAniDbSeasonNames = document.getElementById('chkUseAniDbSeasonNames').checked;
