@@ -227,7 +227,8 @@
 
                         document.getElementById('anidbOverrides').textContent = status.OverridesWrittenAtUtc
                             ? 'written ' + AniDBConfigurationPage.formatDate(status.OverridesWrittenAtUtc)
-                                + ', ' + status.OverridesEntryCount + ' entries read from ' + status.OverridesPath
+                                + ', ' + status.OverridesEntryCount + ' entries and ' + status.OverridesFilmCount
+                                + ' films read from ' + status.OverridesPath
                             : 'none - write ' + status.OverridesPath + ' to place what the sources below cannot';
 
                         document.getElementById('anidbAniBridge').textContent = !status.AniBridgeEnabled

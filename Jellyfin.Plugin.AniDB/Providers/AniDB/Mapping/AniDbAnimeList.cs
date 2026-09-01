@@ -114,6 +114,31 @@ internal static class AniDbAnimeList
     }
 
     /// <summary>
+    /// The AniDB entry a film is. The list carries a film's ids on the entry itself, so what it
+    /// answers is always that entry's own first episode.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="key">The film's key, from <see cref="MovieKey"/>.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The episode, or <c>null</c> when the list identifies no film under that id.</returns>
+    public static async Task<AniDbAnimeListEpisode?> ResolveFilm(
+        IApplicationPaths appPaths,
+        string? key,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(key))
+        {
+            return null;
+        }
+
+        var index = await _cache.GetIndex(appPaths, logger, cancellationToken).ConfigureAwait(false);
+
+        return index?.ResolveFilm(key);
+    }
+
+    /// <summary>
     /// The show an entry is filed under, as the TVDB id its seasons are numbered against.
     /// </summary>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>

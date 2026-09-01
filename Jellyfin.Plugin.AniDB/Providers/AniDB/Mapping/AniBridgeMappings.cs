@@ -147,6 +147,30 @@ internal static class AniBridgeMappings
     }
 
     /// <summary>
+    /// The AniDB entry a film is, and which of its episodes holds it.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="key">The film's key, from <see cref="MovieKey"/>.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The episode, or <c>null</c> when the mappings identify no film under that id.</returns>
+    public static async Task<AniDbAnimeListEpisode?> ResolveFilm(
+        IApplicationPaths appPaths,
+        string? key,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(key))
+        {
+            return null;
+        }
+
+        var index = await GetIndex(appPaths, logger, cancellationToken).ConfigureAwait(false);
+
+        return index?.ResolveFilm(key);
+    }
+
+    /// <summary>
     /// The show an entry is filed under, as the TVDB id its seasons are numbered against.
     /// </summary>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>

@@ -30,15 +30,18 @@ internal sealed class AniBridgeIndex
     private readonly IReadOnlyDictionary<string, AniBridgeEntry> _byAnimeId;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<AniBridgeEntry>> _bySeries;
     private readonly IReadOnlyDictionary<string, string> _firstSeasonByTmdb;
+    private readonly IReadOnlyDictionary<string, AniDbAnimeListEpisode> _films;
 
     private AniBridgeIndex(
         IReadOnlyDictionary<string, AniBridgeEntry> byAnimeId,
         IReadOnlyDictionary<string, IReadOnlyList<AniBridgeEntry>> bySeries,
-        IReadOnlyDictionary<string, string> firstSeasonByTmdb)
+        IReadOnlyDictionary<string, string> firstSeasonByTmdb,
+        IReadOnlyDictionary<string, AniDbAnimeListEpisode> films)
     {
         _byAnimeId = byAnimeId;
         _bySeries = bySeries;
         _firstSeasonByTmdb = firstSeasonByTmdb;
+        _films = films;
     }
 
     /// <summary>
@@ -53,6 +56,13 @@ internal sealed class AniBridgeIndex
     /// Gets how many AniDB entries the mappings place against a TVDB series.
     /// </summary>
     public int EntryCount => _byAnimeId.Count;
+
+    /// <summary>
+    /// Gets how many films the mappings identify. Counted by the AniDB episode each names, not
+    /// by the keys they are filed under: one film is filed under a TMDB, an IMDb and a TVDB id,
+    /// and is one film.
+    /// </summary>
+    public int FilmCount => _films.Values.Distinct().Count();
 
     /// <summary>
     /// Reads a downloaded copy of the mappings.
@@ -74,6 +84,7 @@ internal sealed class AniBridgeIndex
         var spans = new Dictionary<string, List<AniBridgeSpan>>(StringComparer.Ordinal);
         var seriesKeys = new Dictionary<string, string>(StringComparer.Ordinal);
         var tmdbCandidates = new Dictionary<string, List<SeasonClaim>>(StringComparer.Ordinal);
+        var films = new Dictionary<string, List<AniDbAnimeListEpisode>>(StringComparer.Ordinal);
         string? schemaVersion = null;
 
         if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
@@ -108,7 +119,7 @@ internal sealed class AniBridgeIndex
 
             if (TryReadScope(descriptor, out var animeId, out var kind))
             {
-                ReadTargets(ref reader, animeId, kind, spans, seriesKeys, tmdbCandidates);
+                ReadTargets(ref reader, animeId, kind, spans, seriesKeys, tmdbCandidates, films);
             }
             else
             {
@@ -125,7 +136,7 @@ internal sealed class AniBridgeIndex
                 SchemaMajorVersion);
         }
 
-        return Build(spans, seriesKeys, tmdbCandidates, schemaVersion, cachedAtUtc, description, logger);
+        return Build(spans, seriesKeys, tmdbCandidates, films, schemaVersion, cachedAtUtc, description, logger);
     }
 
     /// <summary>
@@ -217,6 +228,14 @@ internal sealed class AniBridgeIndex
     /// <returns>The AniDB id, or <c>null</c> where the mappings place nothing against that id.</returns>
     public string? FirstSeasonByTmdb(string tmdbId)
         => _firstSeasonByTmdb.GetValueOrDefault(tmdbId);
+
+    /// <summary>
+    /// The AniDB entry a film is, and which of its episodes holds it.
+    /// </summary>
+    /// <param name="key">The film's key, from <see cref="MovieKey"/>.</param>
+    /// <returns>The episode, or <c>null</c> where the mappings identify no film under that id.</returns>
+    public AniDbAnimeListEpisode? ResolveFilm(string key)
+        => _films.GetValueOrDefault(key);
 
     /// <summary>
     /// Whether the mappings file the given entry in an ordinary season of a show, which makes
@@ -374,6 +393,24 @@ internal sealed class AniBridgeIndex
         return earliest;
     }
 
+    /// <summary>
+    /// Which claim to keep where more than one names the same film.
+    /// </summary>
+    /// <remarks>
+    /// An entry claims one film twice wherever its ordinary numbering and its specials scope
+    /// both cover it - nineteen films in the set at the time of writing - and the ordinary
+    /// episode is the better of the two: it is the entry AniDB registered for that film, where
+    /// the special is the same film listed again inside whatever it was released alongside.
+    /// </remarks>
+    /// <param name="claims">The claims read for one key.</param>
+    /// <returns>The claim to answer with.</returns>
+    private static AniDbAnimeListEpisode PickFilm(List<AniDbAnimeListEpisode> claims)
+        => claims
+            .OrderBy(claim => claim.Kind == AniDbEpisodeKind.Regular ? 0 : 1)
+            .ThenBy(claim => claim.Number)
+            .ThenBy(claim => NumericId(claim.AnimeId))
+            .First();
+
     private static int NumericId(string animeId)
         => int.TryParse(animeId, CultureInfo.InvariantCulture, out var parsed) ? parsed : int.MaxValue;
 
@@ -381,6 +418,7 @@ internal sealed class AniBridgeIndex
         Dictionary<string, List<AniBridgeSpan>> spans,
         Dictionary<string, string> seriesKeys,
         Dictionary<string, List<SeasonClaim>> tmdbCandidates,
+        Dictionary<string, List<AniDbAnimeListEpisode>> films,
         string? schemaVersion,
         DateTime cachedAtUtc,
         string description,
@@ -404,6 +442,11 @@ internal sealed class AniBridgeIndex
             siblings.Add(entry);
         }
 
+        var identifiedFilms = films.ToDictionary(
+            pair => pair.Key,
+            pair => PickFilm(pair.Value),
+            StringComparer.Ordinal);
+
         var firstSeasonByTmdb = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var (tmdbId, claims) in tmdbCandidates)
@@ -418,18 +461,20 @@ internal sealed class AniBridgeIndex
         }
 
         logger.LogInformation(
-            "{Source}, last written on {WrittenAt} to schema {SchemaVersion}, place {EntryCount} AniDB entries across {SeriesCount} TVDB shows and identify {TmdbCount} TMDB shows",
+            "{Source}, last written on {WrittenAt} to schema {SchemaVersion}, place {EntryCount} AniDB entries across {SeriesCount} TVDB shows, identify {TmdbCount} TMDB shows and identify {FilmCount} films",
             description,
             cachedAtUtc,
             schemaVersion ?? "an unstated version",
             byAnimeId.Count,
             bySeries.Count,
-            firstSeasonByTmdb.Count);
+            firstSeasonByTmdb.Count,
+            identifiedFilms.Values.Distinct().Count());
 
         return new AniBridgeIndex(
             byAnimeId,
             bySeries.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<AniBridgeEntry>)pair.Value, StringComparer.Ordinal),
-            firstSeasonByTmdb);
+            firstSeasonByTmdb,
+            identifiedFilms);
     }
 
     private static string? ReadSchemaVersion(ref Utf8JsonReader reader)
@@ -464,7 +509,8 @@ internal sealed class AniBridgeIndex
         AniDbEpisodeKind kind,
         Dictionary<string, List<AniBridgeSpan>> spans,
         Dictionary<string, string> seriesKeys,
-        Dictionary<string, List<SeasonClaim>> tmdbCandidates)
+        Dictionary<string, List<SeasonClaim>> tmdbCandidates,
+        Dictionary<string, List<AniDbAnimeListEpisode>> films)
     {
         if (reader.TokenType != JsonTokenType.StartObject)
         {
@@ -475,11 +521,18 @@ internal sealed class AniBridgeIndex
         {
             var isTvdb = reader.ValueSpan.StartsWith("tvdb_show:"u8);
 
+            // A film is keyed by its own id with whichever provider, and by no season: the
+            // library holds it as one item, so there is nothing to lay over a numbering.
+            var isFilm = !isTvdb
+                && (reader.ValueSpan.StartsWith("tmdb_movie:"u8)
+                    || reader.ValueSpan.StartsWith("imdb_movie:"u8)
+                    || reader.ValueSpan.StartsWith("tvdb_movie:"u8));
+
             // TMDB is read for identification only, not for placing seasons: the numbering a
             // season is placed against has to be the one Jellyfin numbered the season by, and
             // that is what the show's own provider settled on. Placing TVDB runs against TMDB
             // seasons would move every episode of a show the two databases split differently.
-            if (!isTvdb && !reader.ValueSpan.StartsWith("tmdb_show:"u8))
+            if (!isTvdb && !isFilm && !reader.ValueSpan.StartsWith("tmdb_show:"u8))
             {
                 reader.Skip();
 
@@ -489,6 +542,22 @@ internal sealed class AniBridgeIndex
             var descriptor = reader.GetString()!;
 
             reader.Read();
+
+            if (isFilm)
+            {
+                var key = MovieKey.FromDescriptor(descriptor);
+
+                if (key == null)
+                {
+                    reader.Skip();
+                }
+                else
+                {
+                    ReadFilmClaim(ref reader, animeId, kind, key, films);
+                }
+
+                continue;
+            }
 
             if (!TryReadShow(descriptor, out var showId, out var season))
             {
@@ -559,6 +628,64 @@ internal sealed class AniBridgeIndex
             if (!list.Contains(span))
             {
                 list.Add(span);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reads which episode of an entry a film is.
+    /// </summary>
+    /// <remarks>
+    /// A film's side of the mapping is a single episode, so only the entry's side is read. Most
+    /// name the entry's first ordinary episode, which is to say the film is that AniDB entry;
+    /// the rest name a later episode, a special or one of the other episodes, which is to say
+    /// AniDB holds the film inside an entry registered for something else.
+    /// </remarks>
+    /// <param name="reader">The reader, positioned at the film's ranges.</param>
+    /// <param name="animeId">The AniDB id of the entry.</param>
+    /// <param name="kind">Which of the entry's numberings the scope named.</param>
+    /// <param name="key">The film's key, from <see cref="MovieKey"/>.</param>
+    /// <param name="films">Every claim read so far, by key.</param>
+    private static void ReadFilmClaim(
+        ref Utf8JsonReader reader,
+        string animeId,
+        AniDbEpisodeKind kind,
+        string key,
+        Dictionary<string, List<AniDbAnimeListEpisode>> films)
+    {
+        if (reader.TokenType != JsonTokenType.StartObject)
+        {
+            return;
+        }
+
+        while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+        {
+            var inEntry = AniBridgeRange.Read(reader.GetString());
+
+            reader.Read();
+
+            if (reader.TokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
+            {
+                reader.Skip();
+            }
+
+            // Only a range the film is actually mapped onto counts. A null unmaps it outright.
+            if (inEntry == null || reader.TokenType == JsonTokenType.Null || ReadBand(kind, inEntry) is not { } banded)
+            {
+                continue;
+            }
+
+            var claim = new AniDbAnimeListEpisode(animeId, banded.InEntry.Start, banded.Kind);
+
+            if (!films.TryGetValue(key, out var claims))
+            {
+                claims = [];
+                films[key] = claims;
+            }
+
+            if (!claims.Contains(claim))
+            {
+                claims.Add(claim);
             }
         }
     }

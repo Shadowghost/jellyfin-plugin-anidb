@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -146,6 +147,71 @@ internal static class AniDbMappings
         var byTmdb = await AniBridgeMappings.ResolveSeriesIdByTmdb(appPaths, tmdbId, logger, cancellationToken).ConfigureAwait(false);
 
         return string.IsNullOrEmpty(byTmdb) ? null : new MappedSeries(byTmdb, AniBridge, "TMDB", tmdbId!);
+    }
+
+    /// <summary>
+    /// The AniDB entry a film is, found from whichever ids another provider has already settled
+    /// on, and which of that entry's episodes holds it.
+    /// </summary>
+    /// <remarks>
+    /// A film has no seasons to be laid over, so an id is all there is to go on and every
+    /// source is asked for every id it might carry. The sources are asked in their own order
+    /// rather than the ids in theirs: which source answers decides what the film is taken to
+    /// be, where which of its ids answered decides nothing.
+    /// <para>
+    /// Both downloaded sources identify a film chiefly as an AniDB entry of its own. What the
+    /// overrides add is the other case: a film AniDB holds inside an entry registered for
+    /// something else, as one of its other episodes or one of its specials.
+    /// </para>
+    /// </remarks>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="tmdbId">The TMDB film id, where the item has one.</param>
+    /// <param name="imdbId">The IMDb id, where the item has one.</param>
+    /// <param name="tvdbId">The TVDB film id, where the item has one.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The film, or <c>null</c> when no source identifies one under those ids.</returns>
+    public static async Task<MappedMovie?> ResolveMovieId(
+        IApplicationPaths appPaths,
+        string? tmdbId,
+        string? imdbId,
+        string? tvdbId,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        (string Provider, string? Id, string? Key)[] candidates =
+        [
+            ("TMDB", tmdbId, MovieKey.Tmdb(tmdbId)),
+            ("IMDb", imdbId, MovieKey.Imdb(imdbId)),
+            ("TVDB", tvdbId, MovieKey.Tvdb(tvdbId)),
+        ];
+
+        (string Name, Func<string?, Task<AniDbAnimeListEpisode?>> Resolve)[] sources =
+        [
+            (Overrides, key => AniDbMappingOverrides.ResolveFilm(appPaths, key, logger, cancellationToken)),
+            (AniBridge, key => AniBridgeMappings.ResolveFilm(appPaths, key, logger, cancellationToken)),
+            (AnimeList, key => AniDbAnimeList.ResolveFilm(appPaths, key, logger, cancellationToken)),
+        ];
+
+        foreach (var source in sources)
+        {
+            foreach (var candidate in candidates)
+            {
+                if (candidate.Key == null)
+                {
+                    continue;
+                }
+
+                var found = await source.Resolve(candidate.Key).ConfigureAwait(false);
+
+                if (found != null)
+                {
+                    return new MappedMovie(found, source.Name, candidate.Provider, candidate.Id!);
+                }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

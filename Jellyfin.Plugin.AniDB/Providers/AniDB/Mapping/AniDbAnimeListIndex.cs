@@ -21,13 +21,16 @@ internal sealed class AniDbAnimeListIndex
 
     private readonly IReadOnlyDictionary<string, AniDbAnimeListEntry> _byAnimeId;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<AniDbAnimeListEntry>> _bySeries;
+    private readonly IReadOnlyDictionary<string, AniDbAnimeListEpisode> _films;
 
     private AniDbAnimeListIndex(
         IReadOnlyDictionary<string, AniDbAnimeListEntry> byAnimeId,
-        IReadOnlyDictionary<string, IReadOnlyList<AniDbAnimeListEntry>> bySeries)
+        IReadOnlyDictionary<string, IReadOnlyList<AniDbAnimeListEntry>> bySeries,
+        IReadOnlyDictionary<string, AniDbAnimeListEpisode> films)
     {
         _byAnimeId = byAnimeId;
         _bySeries = bySeries;
+        _films = films;
     }
 
     /// <summary>
@@ -54,14 +57,25 @@ internal sealed class AniDbAnimeListIndex
     {
         var byAnimeId = new Dictionary<string, AniDbAnimeListEntry>(StringComparer.Ordinal);
         var bySeries = new Dictionary<string, List<AniDbAnimeListEntry>>(StringComparer.Ordinal);
+        var films = new Dictionary<string, AniDbAnimeListEpisode>(StringComparer.Ordinal);
 
         foreach (var element in XDocument.Load(path).Root?.Elements("anime") ?? [])
         {
             var animeId = element.Attribute("anidbid")?.Value;
             var seriesKey = element.Attribute("tvdbid")?.Value;
 
+            if (string.IsNullOrEmpty(animeId))
+            {
+                continue;
+            }
+
+            // Read before the series below, because the entries carrying a film id are largely
+            // the ones with no series to be placed against: 893 of them are filed under the
+            // word "movie" where a TVDB id would go.
+            ReadFilmIds(element, animeId, films);
+
             // A film or an OVA the list files under no series has nothing to place it against.
-            if (string.IsNullOrEmpty(animeId) || string.IsNullOrEmpty(seriesKey) || !seriesKey.All(char.IsAsciiDigit))
+            if (string.IsNullOrEmpty(seriesKey) || !seriesKey.All(char.IsAsciiDigit))
             {
                 continue;
             }
@@ -85,14 +99,16 @@ internal sealed class AniDbAnimeListIndex
         }
 
         logger.LogInformation(
-            "The anime list cached on {CachedAt} places {EntryCount} AniDB entries across {SeriesCount} shows",
+            "The anime list cached on {CachedAt} places {EntryCount} AniDB entries across {SeriesCount} shows and identifies {FilmCount} films",
             cachedAtUtc,
             byAnimeId.Count,
-            bySeries.Count);
+            bySeries.Count,
+            films.Values.Distinct().Count());
 
         return new AniDbAnimeListIndex(
             byAnimeId,
-            bySeries.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<AniDbAnimeListEntry>)pair.Value, StringComparer.Ordinal));
+            bySeries.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<AniDbAnimeListEntry>)pair.Value, StringComparer.Ordinal),
+            films);
     }
 
     /// <summary>
@@ -109,6 +125,15 @@ internal sealed class AniDbAnimeListIndex
 
         return _bySeries.TryGetValue(self.SeriesKey, out var siblings) ? siblings : null;
     }
+
+    /// <summary>
+    /// The AniDB entry a film is. The list carries a film's ids on the entry itself, so what it
+    /// answers is always that entry's own first episode.
+    /// </summary>
+    /// <param name="key">The film's key, from <see cref="MovieKey"/>.</param>
+    /// <returns>The episode, or <c>null</c> where the list identifies no film under that id.</returns>
+    public AniDbAnimeListEpisode? ResolveFilm(string key)
+        => _films.GetValueOrDefault(key);
 
     /// <summary>
     /// The show an entry is filed under, as the id its seasons are numbered against. What a
@@ -389,6 +414,37 @@ internal sealed class AniDbAnimeListIndex
         return number >= OtherEpisodeBand
             ? (AniDbEpisodeKind.Other, number - OtherEpisodeBand)
             : (AniDbEpisodeKind.Special, number);
+    }
+
+    /// <summary>
+    /// Files an entry under whatever film ids it carries.
+    /// </summary>
+    /// <remarks>
+    /// The list carries IMDb and TMDB ids for the 1,634 entries that are films, an entry's
+    /// IMDb attribute holding several ids where one AniDB entry covers a film released in
+    /// parts. The first entry to claim an id keeps it: the list is written in AniDB order, so
+    /// that is the earliest entry, and where two claim one film the later is a remake or a
+    /// recut listed against the same release.
+    /// </remarks>
+    /// <param name="element">The anime element.</param>
+    /// <param name="animeId">The AniDB id of the entry.</param>
+    /// <param name="films">Every film identified so far, by key.</param>
+    private static void ReadFilmIds(XElement element, string animeId, Dictionary<string, AniDbAnimeListEpisode> films)
+    {
+        var episode = new AniDbAnimeListEpisode(animeId, 1, AniDbEpisodeKind.Regular);
+
+        foreach (var written in (element.Attribute("imdbid")?.Value ?? string.Empty).Split(','))
+        {
+            if (MovieKey.Imdb(written) is { } key)
+            {
+                films.TryAdd(key, episode);
+            }
+        }
+
+        if (MovieKey.Tmdb(element.Attribute("tmdbid")?.Value) is { } tmdbKey)
+        {
+            films.TryAdd(tmdbKey, episode);
+        }
     }
 
     private static AniDbAnimeListMapping? ReadMapping(XElement element)

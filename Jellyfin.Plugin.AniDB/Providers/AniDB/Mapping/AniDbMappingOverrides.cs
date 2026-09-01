@@ -156,6 +156,30 @@ internal static class AniDbMappingOverrides
     }
 
     /// <summary>
+    /// The AniDB entry a film is, and which of its episodes holds it.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="key">The film's key, from <see cref="MovieKey"/>.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The episode, or <c>null</c> where the file identifies no film under that id.</returns>
+    public static async Task<AniDbAnimeListEpisode?> ResolveFilm(
+        IApplicationPaths appPaths,
+        string? key,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(key))
+        {
+            return null;
+        }
+
+        var index = await _cache.GetIndex(appPaths, logger, cancellationToken).ConfigureAwait(false);
+
+        return index?.ResolveFilm(key);
+    }
+
+    /// <summary>
     /// The entry a show begins in, given an entry of it the file places as a later season.
     /// </summary>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
@@ -242,12 +266,14 @@ internal static class AniDbMappingOverrides
     /// What is known of the file, for the status the configuration page shows.
     /// </summary>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
-    /// <returns>Where the file belongs, when it was last written, and how many entries have been read from it.</returns>
-    internal static (string Path, DateTime? WrittenAtUtc, int EntryCount) GetStatus(IApplicationPaths appPaths)
+    /// <returns>Where the file belongs, when it was last written, and how many entries and films have been read from it.</returns>
+    internal static (string Path, DateTime? WrittenAtUtc, int EntryCount, int FilmCount) GetStatus(IApplicationPaths appPaths)
     {
         var (writtenAtUtc, index, _) = _cache.GetStatus(appPaths);
 
-        return (_cache.GetPath(appPaths), writtenAtUtc, index?.EntryCount ?? 0);
+        // Counted apart because a file that names only films places no season at all, and one
+        // reported as holding no entries would read as a file that had not been understood.
+        return (_cache.GetPath(appPaths), writtenAtUtc, index?.EntryCount ?? 0, index?.FilmCount ?? 0);
     }
 
     /// <summary>

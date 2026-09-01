@@ -99,4 +99,9 @@ public class AniDbStatus
     /// is looked up, which is when the file is first read.
     /// </summary>
     public int OverridesEntryCount { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many films it identifies, which a file may state instead of any season.
+    /// </summary>
+    public int OverridesFilmCount { get; set; }
 }
