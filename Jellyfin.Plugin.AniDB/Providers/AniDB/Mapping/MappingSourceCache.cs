@@ -12,22 +12,25 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 
 /// <summary>
-/// One downloaded mapping file, and whatever was parsed from it. The file is fetched when the
-/// copy on disk is missing or has gone stale, parsed once per copy, and what came out of it is
-/// kept in memory until that copy changes underneath it.
+/// One mapping file, and whatever was parsed from it. A file with a URL is fetched when the
+/// copy on disk is missing or has gone stale; one without is only ever read, being written by
+/// whoever runs the server. Either is parsed once per copy, and what came out of it is kept in
+/// memory until that copy changes underneath it.
 /// </summary>
 /// <typeparam name="TIndex">What the file is parsed into. Placements worked out from one copy belong to it, so anything memoised per lookup belongs on this rather than beside the cache.</typeparam>
-/// <param name="fileName">What the copy on disk is called, within the plugin's data folder.</param>
-/// <param name="url">Where the file is downloaded from.</param>
+/// <param name="fileName">What the copy on disk is called, within the folder named below.</param>
+/// <param name="url">Where the file is downloaded from, or <c>null</c> for a file nobody downloads: one written by hand, which is allowed not to be there and is never thrown away.</param>
 /// <param name="description">How the file is named in log messages, as a noun phrase: "the anime list".</param>
-/// <param name="maxAgeDays">How long a downloaded copy is used before it is fetched again.</param>
+/// <param name="maxAgeDays">How long a downloaded copy is used before it is fetched again. Means nothing for a file that is not downloaded.</param>
 /// <param name="parse">Reads a copy on disk, given its path, a logger and the time it was written.</param>
+/// <param name="folder">Where the file lives, given the application paths. Defaults to the plugin's data folder, which is where a downloaded copy belongs.</param>
 internal sealed class MappingSourceCache<TIndex>(
     string fileName,
-    string url,
+    string? url,
     string description,
     int maxAgeDays,
-    Func<string, ILogger, DateTime, TIndex> parse)
+    Func<string, ILogger, DateTime, TIndex> parse,
+    Func<IApplicationPaths, string>? folder = null)
     : IDisposable
     where TIndex : class
 {
@@ -69,6 +72,14 @@ internal sealed class MappingSourceCache<TIndex>(
     public int MaxAgeInDays => maxAgeDays;
 
     /// <summary>
+    /// Gets how long to wait before looking at a file that could not be read again. A
+    /// downloaded one is waited out: nothing here can mend it, and the next attempt is a fresh
+    /// download. A file written by hand is mended by editing it, which is a minute's work, so
+    /// it is looked at again as often as any other change to it would be noticed.
+    /// </summary>
+    private TimeSpan RetryPause => url == null ? _recheckInterval : _retryAfterFailure;
+
+    /// <summary>
     /// What the file holds, downloading and parsing it where what is in memory will not do.
     /// </summary>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
@@ -100,6 +111,19 @@ internal sealed class MappingSourceCache<TIndex>(
 
             if (!file.Exists || file.Length == 0)
             {
+                // No file at all is the ordinary state of one written by hand, so it is noted
+                // as looked at rather than as failed. Noting it is what keeps a scan from
+                // asking the file system once per episode, and the recheck interval is what
+                // brings a file written since into use without a restart.
+                if (url == null)
+                {
+                    _index = null;
+                    _sourceWrittenAtUtc = DateTime.MinValue;
+                    _checkedAtUtc = DateTime.UtcNow;
+
+                    return null;
+                }
+
                 _failedAtUtc = DateTime.UtcNow;
 
                 return _index;
@@ -123,11 +147,22 @@ internal sealed class MappingSourceCache<TIndex>(
             }
             catch (Exception ex) when (ex is XmlException or JsonException)
             {
-                // A truncated or half-written file would otherwise be read again on every
-                // start until it went stale. Dropping it means the next start downloads afresh.
-                logger.LogWarning(ex, "The cached copy of {Source} at {Path} could not be read and has been discarded", description, path);
+                if (url == null)
+                {
+                    // Not this class's to throw away: it is the only copy there is. It stays
+                    // where it is, unread, and whatever it would have said is left to the
+                    // sources that are downloaded until it is fixed.
+                    logger.LogError(ex, "{Source} at {Path} is not valid JSON, so nothing in it is used. Fix or remove the file", description, path);
+                }
+                else
+                {
+                    // A truncated or half-written file would otherwise be read again on every
+                    // start until it went stale. Dropping it means the next start downloads afresh.
+                    logger.LogWarning(ex, "The cached copy of {Source} at {Path} could not be read and has been discarded", description, path);
 
-                TryDelete(path);
+                    TryDelete(path);
+                }
+
                 _failedAtUtc = DateTime.UtcNow;
             }
         }
@@ -189,12 +224,20 @@ internal sealed class MappingSourceCache<TIndex>(
     {
         var now = DateTime.UtcNow;
 
-        return now - _failedAtUtc < _retryAfterFailure
-            || (_index != null && now - _checkedAtUtc < _recheckInterval);
+        // Checked against the time of the last look rather than against what it produced: a
+        // look that found no file is as good an answer as one that found a whole mapping set.
+        return now - _failedAtUtc < RetryPause
+            || (_checkedAtUtc != DateTime.MinValue && now - _checkedAtUtc < _recheckInterval);
     }
 
-    private string GetPath(IApplicationPaths appPaths)
-        => Path.Combine(AniDbTitleDownloader.GetDataPath(appPaths), fileName);
+    /// <summary>
+    /// Where the file is. Public so that a page can tell the user where to put one they write
+    /// themselves.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <returns>The full path.</returns>
+    public string GetPath(IApplicationPaths appPaths)
+        => Path.Combine(folder == null ? AniDbTitleDownloader.GetDataPath(appPaths) : folder(appPaths), fileName);
 
     /// <summary>
     /// Downloads the file if the copy on disk is missing or has gone stale. A copy that is
@@ -207,6 +250,11 @@ internal sealed class MappingSourceCache<TIndex>(
     /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
     private async Task Refresh(string path, ILogger logger, CancellationToken cancellationToken)
     {
+        if (url == null)
+        {
+            return;
+        }
+
         var file = new FileInfo(path);
         var cached = file.Exists && file.Length > 0;
 
@@ -217,7 +265,7 @@ internal sealed class MappingSourceCache<TIndex>(
 
         try
         {
-            await Download(path, logger, cancellationToken).ConfigureAwait(false);
+            await Download(url, path, logger, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException)
         {
@@ -234,9 +282,9 @@ internal sealed class MappingSourceCache<TIndex>(
         }
     }
 
-    private async Task Download(string path, ILogger logger, CancellationToken cancellationToken)
+    private async Task Download(string sourceUrl, string path, ILogger logger, CancellationToken cancellationToken)
     {
-        logger.LogInformation("Downloading {Source} from {Url}", description, url);
+        logger.LogInformation("Downloading {Source} from {Url}", description, sourceUrl);
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
@@ -247,7 +295,7 @@ internal sealed class MappingSourceCache<TIndex>(
 
         try
         {
-            using (var stream = await httpClient.GetStreamAsync(new Uri(url), cancellationToken).ConfigureAwait(false))
+            using (var stream = await httpClient.GetStreamAsync(new Uri(sourceUrl), cancellationToken).ConfigureAwait(false))
             using (var writer = File.Open(temporaryFile, FileMode.Create, FileAccess.Write))
             {
                 await stream.CopyToAsync(writer, cancellationToken).ConfigureAwait(false);

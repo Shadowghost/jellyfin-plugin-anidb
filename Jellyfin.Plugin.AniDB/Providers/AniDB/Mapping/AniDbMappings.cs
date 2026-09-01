@@ -24,11 +24,18 @@ namespace Jellyfin.Plugin.AniDB.Providers.AniDB.Mapping;
 /// for a show AniBridge places in part. That case is logged, because one of the two is wrong
 /// about it.
 /// </para>
+/// <para>
+/// Ahead of both sit <see cref="AniDbMappingOverrides"/>, written by whoever runs the server.
+/// Neither downloaded source can be corrected from here and neither describes a library that
+/// holds something AniDB does not list, so a file that states such a thing outright is the last
+/// word on whatever it names, and nothing on anything else.
+/// </para>
 /// </remarks>
 internal static class AniDbMappings
 {
     private const string AniBridge = "the AniBridge mappings";
     private const string AnimeList = "the anime list";
+    private const string Overrides = "the mapping overrides";
 
     /// <summary>
     /// How each source that places the given season says it is filled, best account first.
@@ -37,7 +44,9 @@ internal static class AniDbMappings
     /// Every source that places the season is offered, rather than only the first, because a
     /// placement is a claim about entries that may not hold the episodes it claims. The caller
     /// checks each against what AniDB records and takes the first that holds up, so that a
-    /// season one source is wrong about is still filled by the other.
+    /// season one source is wrong about is still filled by the other. A placement from the
+    /// overrides is marked as the last word: the caller takes it wherever AniDB holds what it
+    /// names, and falls back to the sources below it only where AniDB does not.
     /// </remarks>
     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
     /// <param name="seriesId">The AniDB id of the series.</param>
@@ -52,21 +61,30 @@ internal static class AniDbMappings
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        var placements = new List<SeasonPlacement>(2);
+        var placements = new List<SeasonPlacement>(3);
+
+        void Offer(IReadOnlyList<AniDbSeasonSegment>? segments, string source, bool authoritative = false)
+        {
+            // Two sources agreeing is one placement, not two: the caller checks each against
+            // what AniDB records, and checking the same claim twice would only log it twice.
+            if (segments != null && !placements.Any(placement => placement.Segments.SequenceEqual(segments)))
+            {
+                placements.Add(new SeasonPlacement(segments, source, authoritative));
+            }
+        }
+
+        Offer(
+            await AniDbMappingOverrides.ResolveSeason(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false),
+            Overrides,
+            true);
 
         var bridged = await AniBridgeMappings.ResolveSeason(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
 
-        if (bridged != null)
-        {
-            placements.Add(new SeasonPlacement(bridged, AniBridge));
-        }
+        Offer(bridged, AniBridge);
 
         var listed = await AniDbAnimeList.ResolveSeason(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
 
-        if (listed != null && (bridged == null || !bridged.SequenceEqual(listed)))
-        {
-            placements.Add(new SeasonPlacement(listed, AnimeList));
-        }
+        Offer(listed, AnimeList);
 
         if (bridged == null && listed != null)
         {
@@ -94,6 +112,13 @@ internal static class AniDbMappings
         ILogger logger,
         CancellationToken cancellationToken)
     {
+        var overridden = await AniDbMappingOverrides.ResolveSeriesId(appPaths, tvdbId, logger, cancellationToken).ConfigureAwait(false);
+
+        if (!string.IsNullOrEmpty(overridden))
+        {
+            return new MappedSeries(overridden, Overrides, "TVDB", tvdbId!);
+        }
+
         var bridged = await AniBridgeMappings.ResolveSeriesId(appPaths, tvdbId, logger, cancellationToken).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(bridged))
@@ -108,8 +133,16 @@ internal static class AniDbMappings
             return new MappedSeries(listed, AnimeList, "TVDB", tvdbId!);
         }
 
-        // Only AniBridge answers for TMDB, and it is asked last: a show carrying both ids is
-        // better placed by the id its season numbering will be read against.
+        // Only the overrides and AniBridge answer for TMDB, and both are asked after every
+        // source has been asked for TVDB: a show carrying both ids is better placed by the id
+        // its season numbering will be read against.
+        var overriddenByTmdb = await AniDbMappingOverrides.ResolveSeriesIdByTmdb(appPaths, tmdbId, logger, cancellationToken).ConfigureAwait(false);
+
+        if (!string.IsNullOrEmpty(overriddenByTmdb))
+        {
+            return new MappedSeries(overriddenByTmdb, Overrides, "TMDB", tmdbId!);
+        }
+
         var byTmdb = await AniBridgeMappings.ResolveSeriesIdByTmdb(appPaths, tmdbId, logger, cancellationToken).ConfigureAwait(false);
 
         return string.IsNullOrEmpty(byTmdb) ? null : new MappedSeries(byTmdb, AniBridge, "TMDB", tmdbId!);
@@ -129,6 +162,13 @@ internal static class AniDbMappings
         ILogger logger,
         CancellationToken cancellationToken)
     {
+        var overridden = await AniDbMappingOverrides.ResolveFirstSeason(appPaths, animeId, logger, cancellationToken).ConfigureAwait(false);
+
+        if (!string.IsNullOrEmpty(overridden))
+        {
+            return overridden;
+        }
+
         var bridged = await AniBridgeMappings.ResolveFirstSeason(appPaths, animeId, logger, cancellationToken).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(bridged))
@@ -141,7 +181,8 @@ internal static class AniDbMappings
         // and the two disagree about which show an entry belongs to often enough that overruling
         // it here would hand the show to the wrong one. An entry AniBridge knows only as another
         // show's specials is not such a statement, and is left to the anime list.
-        if (await AniBridgeMappings.FilesInOrdinarySeason(appPaths, animeId, logger, cancellationToken).ConfigureAwait(false))
+        if (await AniDbMappingOverrides.FilesInOrdinarySeason(appPaths, animeId, logger, cancellationToken).ConfigureAwait(false)
+            || await AniBridgeMappings.FilesInOrdinarySeason(appPaths, animeId, logger, cancellationToken).ConfigureAwait(false))
         {
             return null;
         }
@@ -172,23 +213,48 @@ internal static class AniDbMappings
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        var placements = new List<AniDbAnimeListEpisode>(2);
+        var placements = new List<AniDbAnimeListEpisode>(3);
 
-        var bridged = await AniBridgeMappings.ResolveSpecial(appPaths, seriesId, episodeNumber, logger, cancellationToken).ConfigureAwait(false);
-
-        if (bridged != null)
+        void Offer(AniDbAnimeListEpisode? episode)
         {
-            placements.Add(bridged);
+            if (episode != null && !placements.Contains(episode))
+            {
+                placements.Add(episode);
+            }
         }
 
-        var listed = await AniDbAnimeList.ResolveSpecial(appPaths, seriesId, episodeNumber, logger, cancellationToken).ConfigureAwait(false);
-
-        if (listed != null && !placements.Contains(listed))
-        {
-            placements.Add(listed);
-        }
+        Offer(await AniDbMappingOverrides.ResolveSpecial(appPaths, seriesId, episodeNumber, logger, cancellationToken).ConfigureAwait(false));
+        Offer(await AniBridgeMappings.ResolveSpecial(appPaths, seriesId, episodeNumber, logger, cancellationToken).ConfigureAwait(false));
+        Offer(await AniDbAnimeList.ResolveSpecial(appPaths, seriesId, episodeNumber, logger, cancellationToken).ConfigureAwait(false));
 
         return placements;
+    }
+
+    /// <summary>
+    /// The show an entry belongs to, as the TVDB id whichever downloaded source places it
+    /// numbers its seasons against.
+    /// </summary>
+    /// <remarks>
+    /// What a sparsely written override file is reached through: it names the one entry a
+    /// season is to be read from, which is rarely the entry the show was identified as, so the
+    /// show the two have in common is the only thing that connects them.
+    /// </remarks>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="animeId">The AniDB id of an entry of the show.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The TVDB id, or <c>null</c> where no source places the entry against one.</returns>
+    public static async Task<string?> ResolveSeriesKey(
+        IApplicationPaths appPaths,
+        string animeId,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var bridged = await AniBridgeMappings.ResolveSeriesKey(appPaths, animeId, logger, cancellationToken).ConfigureAwait(false);
+
+        return string.IsNullOrEmpty(bridged)
+            ? await AniDbAnimeList.ResolveSeriesKey(appPaths, animeId, logger, cancellationToken).ConfigureAwait(false)
+            : bridged;
     }
 
     /// <summary>

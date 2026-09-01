@@ -38,6 +38,7 @@
                             <div class="anidbStatusLine"><dt>AniDB</dt><dd id="anidbState">Loading...</dd></div>
                             <div class="anidbStatusLine"><dt>Requests waiting</dt><dd id="anidbQueued">-</dd></div>
                             <div class="anidbStatusLine"><dt>Requests sent since start</dt><dd id="anidbSent">-</dd></div>
+                            <div class="anidbStatusLine"><dt>Mapping overrides</dt><dd id="anidbOverrides">-</dd></div>
                             <div class="anidbStatusLine"><dt>AniBridge mappings</dt><dd id="anidbAniBridge">-</dd></div>
                             <div class="anidbStatusLine"><dt>Anime list</dt><dd id="anidbAnimeList">-</dd></div>
                         </dl>
@@ -223,6 +224,11 @@
 
                         document.getElementById('anidbSent').textContent = status.RequestsSent
                             + ' (last ' + AniDBConfigurationPage.formatDate(status.LastRequestUtc) + ')';
+
+                        document.getElementById('anidbOverrides').textContent = status.OverridesWrittenAtUtc
+                            ? 'written ' + AniDBConfigurationPage.formatDate(status.OverridesWrittenAtUtc)
+                                + ', ' + status.OverridesEntryCount + ' entries read from ' + status.OverridesPath
+                            : 'none - write ' + status.OverridesPath + ' to place what the sources below cannot';
 
                         document.getElementById('anidbAniBridge').textContent = !status.AniBridgeEnabled
                             ? 'not used'

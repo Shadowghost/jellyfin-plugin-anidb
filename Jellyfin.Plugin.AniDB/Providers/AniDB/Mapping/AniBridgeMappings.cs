@@ -31,12 +31,14 @@ internal static class AniBridgeMappings
     /// </summary>
     private const int MaxAgeDays = 7;
 
+    private const string Description = "the AniBridge mappings";
+
     private static readonly MappingSourceCache<AniBridgeIndex> _cache = new(
         "anibridge-mappings.json",
         MappingsUrl,
-        "the AniBridge mappings",
+        Description,
         MaxAgeDays,
-        AniBridgeIndex.Parse);
+        (path, logger, cachedAtUtc) => AniBridgeIndex.Parse(path, logger, cachedAtUtc, Description));
 
     /// <summary>
     /// The AniDB entries the given season of the given series is filled from, in the order the
@@ -142,6 +144,25 @@ internal static class AniBridgeMappings
         var index = await GetIndex(appPaths, logger, cancellationToken).ConfigureAwait(false);
 
         return index?.FirstSeasonByTmdb(tmdbId);
+    }
+
+    /// <summary>
+    /// The show an entry is filed under, as the TVDB id its seasons are numbered against.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="animeId">The AniDB id of an entry of the show.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The TVDB id, or <c>null</c> where the mappings do not place the entry.</returns>
+    public static async Task<string?> ResolveSeriesKey(
+        IApplicationPaths appPaths,
+        string animeId,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var index = await GetIndex(appPaths, logger, cancellationToken).ConfigureAwait(false);
+
+        return index?.SeriesKeyOf(animeId);
     }
 
     /// <summary>

@@ -81,4 +81,22 @@ public class AniDbStatus
     /// Gets or sets a value indicating whether the AniBridge mappings are consulted at all.
     /// </summary>
     public bool AniBridgeEnabled { get; set; }
+
+    /// <summary>
+    /// Gets or sets where the mapping overrides are read from, whether or not a file is there.
+    /// Nothing downloads that file, so the page has to say where to put one.
+    /// </summary>
+    public string OverridesPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets when the override file was last written, or <c>null</c> where there is no
+    /// such file, which is the ordinary state of an installation.
+    /// </summary>
+    public DateTime? OverridesWrittenAtUtc { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many AniDB entries have been read from it. Zero until the first season
+    /// is looked up, which is when the file is first read.
+    /// </summary>
+    public int OverridesEntryCount { get; set; }
 }

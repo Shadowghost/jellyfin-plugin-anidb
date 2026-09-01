@@ -445,6 +445,25 @@ internal static partial class AniDbSeasonResolver
                 continue;
             }
 
+            // A placement written by hand is not weighed against anything: not against how far
+            // the other sources reach, and not against how long the library's season is. It
+            // says which episodes of which entry fill a season, AniDB holds them, and that is
+            // the whole of the question.
+            if (placement.Authoritative)
+            {
+                if (reported)
+                {
+                    logger.LogInformation(
+                        "Season {SeasonNumber} of AniDB series {SeriesId} is filled with {Placement}, where {Source} place it",
+                        seasonNumber,
+                        seriesId,
+                        string.Join(", ", placement.Segments.Select(SeasonSegments.Describe)),
+                        placement.Source);
+                }
+
+                return (placement.Segments, []);
+            }
+
             var reach = Reach(placement.Segments);
 
             if (best == null || reach > covered)

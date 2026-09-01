@@ -114,6 +114,27 @@ internal static class AniDbAnimeList
     }
 
     /// <summary>
+    /// The show an entry is filed under, as the TVDB id its seasons are numbered against.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="animeId">The AniDB id of an entry of the show.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The TVDB id, or <c>null</c> where the list does not place the entry against one.</returns>
+    public static async Task<string?> ResolveSeriesKey(
+        IApplicationPaths appPaths,
+        string animeId,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var index = await _cache.GetIndex(appPaths, logger, cancellationToken).ConfigureAwait(false);
+        var seriesKey = index?.SeriesKeyOf(animeId);
+
+        // The list keys a show TVDB does not carry under a placeholder word instead of an id.
+        return seriesKey != null && seriesKey.All(char.IsAsciiDigit) ? seriesKey : null;
+    }
+
+    /// <summary>
     /// The entry a show begins in, given an entry of it that the list files as a later season.
     /// AniDB titles a second season "&lt;name&gt; (&lt;year&gt;)" as readily as it titles a
     /// remake that way, so a name match on a show whose seasons all aired in one year lands on

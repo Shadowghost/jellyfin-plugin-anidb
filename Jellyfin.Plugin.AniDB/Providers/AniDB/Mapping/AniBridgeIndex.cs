@@ -60,8 +60,9 @@ internal sealed class AniBridgeIndex
     /// <param name="path">Where the copy is cached.</param>
     /// <param name="logger">The logger of whichever provider is asking.</param>
     /// <param name="cachedAtUtc">When the copy was written.</param>
+    /// <param name="description">How the file is named in log messages, as a noun phrase. The schema is read by more than one file: the downloaded mappings, and the overrides written by whoever runs the server.</param>
     /// <returns>The mappings.</returns>
-    public static AniBridgeIndex Parse(string path, ILogger logger, DateTime cachedAtUtc)
+    public static AniBridgeIndex Parse(string path, ILogger logger, DateTime cachedAtUtc, string description)
     {
         // Read whole rather than streamed. The file is a single object of some seventy thousand
         // keys, all but the AniDB ones skipped, so a reader over the bytes costs one buffer the
@@ -118,12 +119,13 @@ internal sealed class AniBridgeIndex
         if (schemaVersion != null && !schemaVersion.StartsWith(SchemaMajorVersion + ".", StringComparison.Ordinal))
         {
             logger.LogWarning(
-                "The AniBridge mappings are written to schema {SchemaVersion}, and this reads schema {SupportedVersion}. Seasons may be placed wrongly until the plugin is updated",
+                "{Source} are written to schema {SchemaVersion}, and this reads schema {SupportedVersion}. Seasons may be placed wrongly until the plugin is updated",
+                description,
                 schemaVersion,
                 SchemaMajorVersion);
         }
 
-        return Build(spans, seriesKeys, tmdbCandidates, schemaVersion, cachedAtUtc, logger);
+        return Build(spans, seriesKeys, tmdbCandidates, schemaVersion, cachedAtUtc, description, logger);
     }
 
     /// <summary>
@@ -140,6 +142,28 @@ internal sealed class AniBridgeIndex
 
         return _bySeries.TryGetValue(self.SeriesKey, out var siblings) ? siblings : null;
     }
+
+    /// <summary>
+    /// Every entry filed under the given show.
+    /// </summary>
+    /// <param name="seriesKey">The TVDB id the show's seasons are numbered against.</param>
+    /// <returns>The entries, or <c>null</c> where nothing is filed under that show.</returns>
+    public IReadOnlyList<AniBridgeEntry>? EntriesFor(string seriesKey)
+        => _bySeries.GetValueOrDefault(seriesKey);
+
+    /// <summary>
+    /// The show an entry is filed under, as the TVDB id its seasons are numbered against.
+    /// </summary>
+    /// <remarks>
+    /// What a sparsely written set of mappings is reached through. Such a set names the one
+    /// entry it has something to say about, which is rarely the entry a show is identified as,
+    /// so a lookup by that entry finds nothing; the show it belongs to is what the two sets
+    /// have in common.
+    /// </remarks>
+    /// <param name="animeId">The AniDB id of an entry of the show.</param>
+    /// <returns>The TVDB id, or <c>null</c> where the mappings do not place that entry.</returns>
+    public string? SeriesKeyOf(string animeId)
+        => _byAnimeId.TryGetValue(animeId, out var entry) ? entry.SeriesKey : null;
 
     /// <summary>
     /// Works out which of a show's entries fill the given season, and which of their episodes
@@ -359,6 +383,7 @@ internal sealed class AniBridgeIndex
         Dictionary<string, List<SeasonClaim>> tmdbCandidates,
         string? schemaVersion,
         DateTime cachedAtUtc,
+        string description,
         ILogger logger)
     {
         var byAnimeId = new Dictionary<string, AniBridgeEntry>(StringComparer.Ordinal);
@@ -393,7 +418,8 @@ internal sealed class AniBridgeIndex
         }
 
         logger.LogInformation(
-            "The AniBridge mappings cached on {CachedAt}, written to schema {SchemaVersion}, place {EntryCount} AniDB entries across {SeriesCount} TVDB shows and identify {TmdbCount} TMDB shows",
+            "{Source}, last written on {WrittenAt} to schema {SchemaVersion}, place {EntryCount} AniDB entries across {SeriesCount} TVDB shows and identify {TmdbCount} TMDB shows",
+            description,
             cachedAtUtc,
             schemaVersion ?? "an unstated version",
             byAnimeId.Count,

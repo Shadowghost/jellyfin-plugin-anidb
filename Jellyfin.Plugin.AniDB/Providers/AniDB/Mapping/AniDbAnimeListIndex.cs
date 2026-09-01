@@ -111,6 +111,16 @@ internal sealed class AniDbAnimeListIndex
     }
 
     /// <summary>
+    /// The show an entry is filed under, as the id its seasons are numbered against. What a
+    /// sparsely written set of mappings is reached through, which names one entry of a show
+    /// rather than the entry the show is identified as.
+    /// </summary>
+    /// <param name="animeId">The AniDB id of an entry of the show.</param>
+    /// <returns>The series key, or <c>null</c> where the list does not place that entry.</returns>
+    public string? SeriesKeyOf(string animeId)
+        => _byAnimeId.TryGetValue(animeId, out var entry) ? entry.SeriesKey : null;
+
+    /// <summary>
     /// The entry a show begins in, found from the TVDB id another provider has already settled
     /// on. The list keys its entries by TVDB id, so this identifies a show outright where
     /// matching on the name cannot: where AniDB spells the name differently, and where two
