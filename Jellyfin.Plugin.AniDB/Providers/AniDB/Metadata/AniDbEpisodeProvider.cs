@@ -88,7 +88,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
 
     private async Task<FileInfo?> FindEpisodeXml(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
     {
-        var (animeId, numberInEntry) = await GetEpisodeSource(info, seriesId, cancellationToken).ConfigureAwait(false);
+        var (animeId, numberInEntry, kind) = await GetEpisodeSource(info, seriesId, cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrEmpty(animeId) || numberInEntry is null)
         {
             return null;
@@ -100,7 +100,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
             return null;
         }
 
-        var xml = GetEpisodeXmlFile(numberInEntry, string.Empty, seriesFolder);
+        var xml = GetEpisodeXmlFile(numberInEntry, kind.Prefix(), seriesFolder);
 
         if (xml == null || !xml.Exists)
         {
@@ -138,45 +138,51 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
     /// <returns>The special's document, or <c>null</c> when it cannot be identified.</returns>
     private async Task<FileInfo?> FindSpecialXml(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
     {
-        // The list is where a film that the season numbering files among the specials is
-        // recorded. Nothing about AniDB's own specials can turn one up: it is an anime of its
-        // own there, with ordinary episodes.
+        // The mapping sources are where a film that the season numbering files among the
+        // specials is recorded. Nothing about AniDB's own specials can turn one up: it is an
+        // anime of its own there, with ordinary episodes.
         if (info.IndexNumber is { } specialNumber)
         {
-            var listed = await AniDbAnimeList.ResolveSpecial(
+            var placements = await AniDbMappings.ResolveSpecials(
                 _configurationManager.ApplicationPaths,
                 seriesId,
                 specialNumber,
                 _logger,
                 cancellationToken).ConfigureAwait(false);
 
-            if (listed != null)
+            foreach (var placed in placements)
             {
-                var listedFolder = await FindSeriesFolder(listed.AnimeId, cancellationToken).ConfigureAwait(false);
-                var listedXml = string.IsNullOrEmpty(listedFolder)
+                var placedFolder = await FindSeriesFolder(placed.AnimeId, cancellationToken).ConfigureAwait(false);
+                var placedXml = string.IsNullOrEmpty(placedFolder)
                     ? null
-                    : GetEpisodeXmlFile(listed.Number, listed.IsSpecial ? "S" : string.Empty, listedFolder);
+                    : GetEpisodeXmlFile(placed.Number, placed.Kind.Prefix(), placedFolder);
 
-                if (listedXml?.Exists == true)
+                if (placedXml?.Exists == true)
                 {
                     _logger.LogDebug(
-                        "Special {EpisodeNumber} of AniDB series {SeriesId} read from {EpisodeNumberInEntry} of anime {AnimeId}, where the anime list places it",
+                        "Special {EpisodeNumber} of AniDB series {SeriesId} read from {EpisodeNumberInEntry} of anime {AnimeId}, where the mapping sources place it",
                         info.IndexNumber,
                         seriesId,
-                        listed.Number,
-                        listed.AnimeId);
+                        placed.Number,
+                        placed.AnimeId);
 
-                    return listedXml;
+                    return placedXml;
                 }
+            }
 
-                _logger.LogWarning(
-                    "The anime list places special {EpisodeNumber} of AniDB series {SeriesId} at {EpisodeNumberInEntry} of anime {AnimeId}, which holds no such episode. It stays without metadata",
+            // A placement naming an episode that does not exist is not the end of the search.
+            // It means the source is wrong about this special, or the entry it names has not
+            // been fetched yet, and either way the show's own specials are still worth reading:
+            // that is how every special the sources do not place is identified.
+            if (placements.Count > 0)
+            {
+                _logger.LogDebug(
+                    "The mapping sources place special {EpisodeNumber} of AniDB series {SeriesId} at {Placement}, none of which holds such an episode, so it is matched against the show's own specials instead",
                     info.IndexNumber,
                     seriesId,
-                    listed.Number,
-                    listed.AnimeId);
-
-                return null;
+                    string.Join(
+                        ", ",
+                        placements.Select(placed => FormattableString.Invariant($"{placed.Number} of anime {placed.AnimeId}"))));
             }
         }
 
@@ -214,23 +220,22 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
         // lines up with nothing, and numbering straight down the list would give every special
         // after the first difference the wrong entry.
         var libraryCount = AniDbSeasonLayout.Read(_libraryManager, seriesId)?.SpecialsCount;
-        var aligned = libraryCount == specials.Count;
+        var aligned = Align(specials, libraryCount);
 
         var match = MatchById(specials, info)
             ?? MatchByTitle(specials, info)
             ?? MatchByDate(specials, info)
-            ?? (aligned ? MatchByPosition(specials, info) : null);
+            ?? (aligned == null ? null : MatchByPosition(aligned, info));
 
         if (match == null)
         {
             _logger.LogWarning(
-                "Special {EpisodeNumber} of AniDB series {SeriesId} matches none of the {SpecialCount} specials across its {EntryCount} AniDB entries by id, title or air date, so it stays without metadata. The library has {LibraryCount} specials, so they {Aligned} be numbered straight through AniDB's. Set its AniDB id by hand to fill it in",
+                "Special {EpisodeNumber} of AniDB series {SeriesId} matches none of the {SpecialCount} specials across its {EntryCount} AniDB entries by id, title or air date, so it stays without metadata. The library has {LibraryCount} specials, which line up with neither the whole of that list nor any single entry of it, so they cannot be numbered straight through. Set its AniDB id by hand to fill it in",
                 info.IndexNumber,
                 seriesId,
                 specials.Count,
                 chain.Count,
-                libraryCount,
-                aligned ? "could" : "cannot");
+                libraryCount);
 
             return null;
         }
@@ -243,6 +248,40 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
             match.AnimeId);
 
         return new FileInfo(match.Path);
+    }
+
+    /// <summary>
+    /// The specials the library's specials season can be numbered straight through, or
+    /// <c>null</c> where nothing lines up with it.
+    /// </summary>
+    /// <remarks>
+    /// The whole chain lines up where the library holds every special every entry of the show
+    /// lists. Where it does not, one entry's own specials still may: a show whose later seasons'
+    /// specials were never released, or never kept, holds exactly the specials of the entry they
+    /// belong to, and AniDB numbering them S1 upwards is the same order the library numbers them
+    /// in. Only one entry may hold that many for this to be evidence rather than a guess.
+    /// </remarks>
+    /// <param name="specials">Every special across the show's entries, in order.</param>
+    /// <param name="libraryCount">How many specials the library holds, or <c>null</c> where it cannot be read.</param>
+    /// <returns>The specials to count through, or <c>null</c>.</returns>
+    private static IReadOnlyList<AniDbSpecial>? Align(IReadOnlyList<AniDbSpecial> specials, int? libraryCount)
+    {
+        if (libraryCount is not > 0)
+        {
+            return null;
+        }
+
+        if (libraryCount == specials.Count)
+        {
+            return specials;
+        }
+
+        var entries = specials
+            .GroupBy(special => special.AnimeId, StringComparer.Ordinal)
+            .Where(entry => entry.Count() == libraryCount)
+            .ToList();
+
+        return entries.Count == 1 ? [.. entries[0].OrderBy(special => special.Number)] : null;
     }
 
     /// <summary>
@@ -336,11 +375,11 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
     /// <param name="seriesId">The AniDB id of the series.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The entry and the episode's number in it, or nulls when neither can be identified.</returns>
-    private async Task<(string? AnimeId, int? NumberInEntry)> GetEpisodeSource(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
+    private async Task<(string? AnimeId, int? NumberInEntry, AniDbEpisodeKind Kind)> GetEpisodeSource(EpisodeInfo info, string seriesId, CancellationToken cancellationToken)
     {
         if (info.IndexNumber is not { } episodeNumber)
         {
-            return (null, null);
+            return (null, null, AniDbEpisodeKind.Regular);
         }
 
         // Every AniDB anime numbers its episodes from one, so an episode can only be looked up
@@ -348,7 +387,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
         // them in the entry they belong to, under their own numbering.
         if (Plugin.Instance.Configuration.IgnoreSeason || info.ParentIndexNumber is null or <= 0)
         {
-            return (seriesId, episodeNumber);
+            return (seriesId, episodeNumber, AniDbEpisodeKind.Regular);
         }
 
         var segments = await AniDbSeasonResolver.ResolveSeasonSegments(
@@ -366,17 +405,17 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
         if (!string.IsNullOrEmpty(seasonId)
             && (segments == null || !string.Equals(seasonId, segments[0].AnimeId, StringComparison.Ordinal)))
         {
-            return (seasonId, episodeNumber);
+            return (seasonId, episodeNumber, AniDbEpisodeKind.Regular);
         }
 
         if (segments == null)
         {
-            return (null, null);
+            return (null, null, AniDbEpisodeKind.Regular);
         }
 
         var segment = AniDbSeasonResolver.PickSegment(segments, episodeNumber);
 
-        return (segment.AnimeId, segment.FirstEpisodeInEntry + (episodeNumber - segment.FirstEpisodeNumber));
+        return (segment.AnimeId, segment.FirstEpisodeInEntry + (episodeNumber - segment.FirstEpisodeNumber), segment.Kind);
     }
 
     private async Task<string?> FindSeriesFolder(string seriesId, CancellationToken cancellationToken)
@@ -528,7 +567,16 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
             ? string.Empty
             : string.Concat(value.Where(char.IsLetterOrDigit)).ToLowerInvariant();
 
-    private static async Task ParseEpisodeXml(FileInfo xml, Episode episode, string preferredMetadataLanguage)
+    /// <summary>
+    /// Fills an episode from its cached document. Internal because a film AniDB holds inside
+    /// another entry is one of these episodes, and the movie provider reads its own name and
+    /// air date from here rather than from the whole entry's record.
+    /// </summary>
+    /// <param name="xml">The episode's cached document.</param>
+    /// <param name="episode">The episode to fill.</param>
+    /// <param name="preferredMetadataLanguage">The language its title is wanted in.</param>
+    /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
+    internal static async Task ParseEpisodeXml(FileInfo xml, Episode episode, string preferredMetadataLanguage)
     {
         var settings = new XmlReaderSettings
         {
@@ -616,7 +664,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
             }
         }
 
-        var title = titles.Localize(Configuration.TitlePreferenceType.Localized, preferredMetadataLanguage)?.Name;
+        var title = titles.Localize(Plugin.Instance.Configuration.TitlePreference, preferredMetadataLanguage)?.Name;
         if (!string.IsNullOrEmpty(title))
         {
             episode.Name = Plugin.Instance.Configuration.AniDbReplaceGraves
@@ -625,7 +673,14 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
         }
     }
 
-    private static FileInfo? GetEpisodeXmlFile(int? episodeNumber, string type, string seriesDataPath)
+    /// <summary>
+    /// The cached document of one episode of an entry.
+    /// </summary>
+    /// <param name="episodeNumber">The episode's number within the entry.</param>
+    /// <param name="type">The prefix of its numbering, from <see cref="AniDbEpisodeKindExtensions.Prefix"/>.</param>
+    /// <param name="seriesDataPath">Where the entry's documents are cached.</param>
+    /// <returns>The document, which may not exist, or <c>null</c> where no number was given.</returns>
+    internal static FileInfo? GetEpisodeXmlFile(int? episodeNumber, string type, string seriesDataPath)
     {
         if (episodeNumber == null)
         {

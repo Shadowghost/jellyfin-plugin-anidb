@@ -89,6 +89,21 @@ internal static partial class AniDbSeasonResolver
     /// episode, all at the same time; without this each of them would walk the chain, and every
     /// walk costs AniDB requests that the first one is about to make anyway.
     /// </summary>
+    /// <summary>
+    /// How many episodes AniDB records for an entry, against the timestamp of the document it
+    /// was read from. Checking a placement needs this for each of its segments, and each of a
+    /// season's episodes has the placement checked, so parsing that document every time would
+    /// cost more than the check is worth. Keyed by timestamp so that a document downloaded
+    /// again is read again: an entry still airing gains episodes.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, (DateTime WrittenAtUtc, int EpisodeCount)> _episodeCounts = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The seasons whose placement has already been reported, so that it is said once rather
+    /// than once per episode.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, byte> _reportedPlacements = new(StringComparer.Ordinal);
+
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _mappingGates = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -322,14 +337,14 @@ internal static partial class AniDbSeasonResolver
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        var listed = await AniDbAnimeList.ResolveSeason(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
+        var layout = AniDbSeasonLayout.Read(libraryManager, seriesId);
+        var placed = await PickPlacement(appPaths, seriesId, seasonNumber, layout, logger, cancellationToken).ConfigureAwait(false);
 
-        if (listed != null)
+        if (placed.Fitted.Count > 0)
         {
-            return listed;
+            return placed.Fitted;
         }
 
-        var layout = AniDbSeasonLayout.Read(libraryManager, seriesId);
         var key = seriesId + "|" + (layout?.Signature ?? "-");
 
         if (!_mappings.TryGetValue(key, out var mapping))
@@ -356,6 +371,13 @@ internal static partial class AniDbSeasonResolver
             return segments;
         }
 
+        // A placement that does not account for the season is still better than nothing, and
+        // this is where nothing is what the chain came to.
+        if (placed.Partial.Count > 0)
+        {
+            return placed.Partial;
+        }
+
         if (_reportedUnmapped.TryAdd(FormattableString.Invariant($"{key}/{seasonNumber}"), 0))
         {
             logger.LogWarning(
@@ -365,6 +387,244 @@ internal static partial class AniDbSeasonResolver
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The placement of a season that holds up against what AniDB records, out of those the
+    /// mapping sources offer.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="seriesId">The AniDB id of the series.</param>
+    /// <param name="seasonNumber">The season number.</param>
+    /// <param name="layout">How the series is laid out in the library, or <c>null</c> when it cannot be seen.</param>
+    /// <param name="logger">The logger of whichever provider is asking.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The placement that accounts for the season, and the fullest that does not.</returns>
+    private static async Task<(IReadOnlyList<AniDbSeasonSegment> Fitted, IReadOnlyList<AniDbSeasonSegment> Partial)> PickPlacement(
+        IApplicationPaths appPaths,
+        string seriesId,
+        int seasonNumber,
+        AniDbSeasonLayout? layout,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        var placements = await AniDbMappings.ResolveSeasons(appPaths, seriesId, seasonNumber, logger, cancellationToken).ConfigureAwait(false);
+
+        if (placements.Count == 0)
+        {
+            return ([], []);
+        }
+
+        // Said once per season rather than once per episode. The placement is worked out afresh
+        // each time, cheaply, so that a mapping file downloaded since is acted on without
+        // waiting for a restart.
+        var reported = _reportedPlacements.TryAdd(FormattableString.Invariant($"{seriesId}/{seasonNumber}"), 0);
+        var wanted = layout?.Seasons.FirstOrDefault(season => season.Number == seasonNumber)?.EpisodeCount ?? 0;
+
+        SeasonPlacement? best = null;
+        var covered = 0;
+
+        foreach (var placement in placements)
+        {
+            var unheld = await FirstUnheldSegment(appPaths, placement.Segments).ConfigureAwait(false);
+
+            if (unheld != null)
+            {
+                if (reported)
+                {
+                    logger.LogWarning(
+                        "{Source} fill season {SeasonNumber} of AniDB series {SeriesId} from episode {EpisodeNumberInEntry} onwards of anime {AnimeId}, which AniDB records only {EpisodeCount} episodes for, so that placement is not used",
+                        placement.Source,
+                        seasonNumber,
+                        seriesId,
+                        unheld.Segment.FirstEpisodeInEntry,
+                        unheld.Segment.AnimeId,
+                        unheld.EpisodeCount);
+                }
+
+                continue;
+            }
+
+            // A placement written by hand is not weighed against anything: not against how far
+            // the other sources reach, and not against how long the library's season is. It
+            // says which episodes of which entry fill a season, AniDB holds them, and that is
+            // the whole of the question.
+            if (placement.Authoritative)
+            {
+                if (reported)
+                {
+                    logger.LogInformation(
+                        "Season {SeasonNumber} of AniDB series {SeriesId} is filled with {Placement}, where {Source} place it",
+                        seasonNumber,
+                        seriesId,
+                        string.Join(", ", placement.Segments.Select(SeasonSegments.Describe)),
+                        placement.Source);
+                }
+
+                return (placement.Segments, []);
+            }
+
+            var reach = Reach(placement.Segments);
+
+            if (best == null || reach > covered)
+            {
+                best = placement;
+                covered = reach;
+            }
+
+            // Nothing beats accounting for the whole season, and where the library cannot say
+            // how long the season is there is nothing to compare by, so the first source to
+            // answer keeps its precedence.
+            if (wanted <= 0 || covered >= wanted)
+            {
+                break;
+            }
+        }
+
+        if (best == null)
+        {
+            return ([], []);
+        }
+
+        // A placement that leaves episodes of the season unaccounted for is not describing this
+        // library's season. Inuyasha is the case that shows why: TVDB has since merged what the
+        // sources still call its sixth and seventh seasons, so from the sixth on their numbering
+        // runs one ahead of the library's, and the season holding the Final Act is given the
+        // last eight episodes of the original series instead. Laying the chain of entries over
+        // the seasons the library actually has gets that right, so it is given the chance to,
+        // and this is kept only for where the chain comes to nothing.
+        var fits = wanted <= 0 || covered >= wanted;
+
+        if (reported)
+        {
+            if (fits)
+            {
+                logger.LogInformation(
+                    "Season {SeasonNumber} of AniDB series {SeriesId} is filled with {Placement}, where {Source} place it",
+                    seasonNumber,
+                    seriesId,
+                    string.Join(", ", best.Segments.Select(SeasonSegments.Describe)),
+                    best.Source);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "{Source} account for {Covered} of the {Wanted} episodes the library holds under season {SeasonNumber} of AniDB series {SeriesId}, so that placement is not used and the season is worked out from AniDB's own relations instead. The mapping file is describing a different season layout from the one the library has",
+                    best.Source,
+                    covered,
+                    wanted,
+                    seasonNumber,
+                    seriesId);
+            }
+        }
+
+        return fits ? (best.Segments, []) : ([], best.Segments);
+    }
+
+    /// <summary>
+    /// How many of a season's episodes a placement accounts for.
+    /// </summary>
+    /// <remarks>
+    /// A source that describes only part of a season - AniBridge maps one episode of Ginga
+    /// Eiyuu Densetsu: Die Neue These's later seasons and leaves the other eleven to its own
+    /// scope for AniDB's other episode types, which nothing here reads - would otherwise be
+    /// preferred over one that describes all of it, its answer being neither empty nor wrong
+    /// about the episode it does name.
+    /// </remarks>
+    /// <param name="segments">The segments the placement is made of.</param>
+    /// <returns>The episode count, or <see cref="int.MaxValue"/> where a segment runs to the end of the season.</returns>
+    private static int Reach(IReadOnlyList<AniDbSeasonSegment> segments)
+    {
+        var reach = 0;
+
+        foreach (var segment in segments)
+        {
+            if (segment.EpisodeCount <= 0)
+            {
+                return int.MaxValue;
+            }
+
+            reach += segment.EpisodeCount;
+        }
+
+        return reach;
+    }
+
+    /// <summary>
+    /// The first segment of a placement that names episodes the entry it names does not have.
+    /// </summary>
+    /// <remarks>
+    /// The mapping sources report tens of thousands of range inconsistencies among themselves,
+    /// and a segment reaching past the end of its entry is the one kind that can be checked
+    /// here for nothing: the entry's episode count is in a document already on disk. An entry
+    /// that is not cached cannot be checked, and is taken at the source's word rather than
+    /// spending a request to doubt it.
+    /// </remarks>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="segments">The segments the placement is made of.</param>
+    /// <returns>The offending segment and the entry's episode count, or <c>null</c> where every segment holds up.</returns>
+    private static async Task<UnheldSegment?> FirstUnheldSegment(IApplicationPaths appPaths, IReadOnlyList<AniDbSeasonSegment> segments)
+    {
+        foreach (var segment in segments)
+        {
+            // AniDB counts an entry's ordinary episodes and nothing else, so a segment reading
+            // from another of its numberings has nothing here to be checked against.
+            if (segment.Kind != AniDbEpisodeKind.Regular)
+            {
+                continue;
+            }
+
+            var episodeCount = await GetCachedEpisodeCount(appPaths, segment.AnimeId).ConfigureAwait(false);
+
+            // Nothing on disk to check against. AniDB also counts an anime still airing as the
+            // episodes it will have, so a segment reaching into a season part way through
+            // airing is not an inconsistency.
+            if (episodeCount <= 0)
+            {
+                continue;
+            }
+
+            // A segment with no count runs to the end of the season, so only where it starts
+            // can be checked.
+            var last = segment.EpisodeCount > 0
+                ? segment.FirstEpisodeInEntry + segment.EpisodeCount - 1
+                : segment.FirstEpisodeInEntry;
+
+            if (last > episodeCount)
+            {
+                return new UnheldSegment(segment, episodeCount);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// How many episodes AniDB records for an entry, read from the document already on disk.
+    /// </summary>
+    /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
+    /// <param name="animeId">The AniDB id of the entry.</param>
+    /// <returns>The episode count, or 0 where the entry is not cached or records none.</returns>
+    private static async Task<int> GetCachedEpisodeCount(IApplicationPaths appPaths, string animeId)
+    {
+        var path = Path.Combine(AniDbSeriesProvider.GetSeriesDataPath(appPaths, animeId), "series.xml");
+        var file = new FileInfo(path);
+
+        if (!file.Exists || file.Length == 0)
+        {
+            return 0;
+        }
+
+        if (_episodeCounts.TryGetValue(animeId, out var known) && known.WrittenAtUtc == file.LastWriteTimeUtc)
+        {
+            return known.EpisodeCount;
+        }
+
+        var summary = await ParseSummary(animeId, path).ConfigureAwait(false);
+
+        _episodeCounts[animeId] = (file.LastWriteTimeUtc, summary.EpisodeCount);
+
+        return summary.EpisodeCount;
     }
 
     /// <summary>
@@ -405,6 +665,9 @@ internal static partial class AniDbSeasonResolver
 
         var chain = new List<AniDbAnimeSummary> { first };
         var chainIndex = 0;
+
+        // How many episodes of the entry at that position earlier seasons have already taken.
+        var consumedInEntry = 0;
         var complete = true;
 
         foreach (var season in layout?.Seasons ?? GetAssumedSeasons())
@@ -428,13 +691,20 @@ internal static partial class AniDbSeasonResolver
                     break;
                 }
 
-                // An entry AniDB gives no episode count for takes whatever the season has left,
-                // so that it is never the reason a second entry is pulled in.
-                var count = entry.EpisodeCount > 0 ? entry.EpisodeCount : Math.Max(season.EpisodeCount - covered, 0);
+                var (count, outlastsSeason) = Allocate(entry.EpisodeCount, consumedInEntry, season.EpisodeCount, covered);
 
-                segments.Add(new AniDbSeasonSegment(entry.Id, season.FirstEpisodeNumber + covered, count));
+                segments.Add(new AniDbSeasonSegment(entry.Id, season.FirstEpisodeNumber + covered, count, consumedInEntry + 1));
                 covered += count;
-                chainIndex++;
+
+                if (outlastsSeason)
+                {
+                    consumedInEntry += count;
+                }
+                else
+                {
+                    chainIndex++;
+                    consumedInEntry = 0;
+                }
 
                 if (season.EpisodeCount - covered < MinimumSplitEpisodes || segments.Count >= MaxSegmentsPerSeason)
                 {
@@ -483,6 +753,40 @@ internal static partial class AniDbSeasonResolver
         }
 
         return mapping;
+    }
+
+    /// <summary>
+    /// How much of an entry one season takes, and whether the entry runs on past it.
+    /// </summary>
+    /// <remarks>
+    /// An entry with more episodes left than the season has room for is one that the season
+    /// numbering breaks into several seasons, as a long-running show kept as a single AniDB
+    /// entry is: Dragon Ball Z is one entry of 291 episodes that TVDB splits into nine. Such an
+    /// entry gives this season what fits and keeps the rest for the next one. Taking a fresh
+    /// entry per season instead left every season past the first with nothing, the chain having
+    /// run out after one.
+    /// </remarks>
+    /// <param name="entryEpisodeCount">How many episodes AniDB records for the entry, or 0 where it records none.</param>
+    /// <param name="consumedInEntry">How many of the entry's episodes earlier seasons have taken.</param>
+    /// <param name="seasonEpisodeCount">How many episode numbers the season spans, or 0 where the library cannot be read.</param>
+    /// <param name="covered">How many of the season's episodes the segments so far account for.</param>
+    /// <returns>How many episodes this season takes from the entry, and whether the entry has episodes left over.</returns>
+    private static (int Count, bool OutlastsSeason) Allocate(int entryEpisodeCount, int consumedInEntry, int seasonEpisodeCount, int covered)
+    {
+        var room = Math.Max(seasonEpisodeCount - covered, 0);
+
+        // An entry AniDB gives no episode count for takes whatever the season has left, so that
+        // it is never the reason a second entry is pulled in. Without a season length to fit it
+        // to there is nothing to split against either, and the entry answers for the season
+        // whole, which is what a library that cannot be read has always been given.
+        if (entryEpisodeCount <= 0 || seasonEpisodeCount <= 0)
+        {
+            return (entryEpisodeCount > 0 ? entryEpisodeCount - consumedInEntry : room, false);
+        }
+
+        var left = entryEpisodeCount - consumedInEntry;
+
+        return left > room ? (room, true) : (left, false);
     }
 
     /// <summary>
@@ -556,6 +860,13 @@ internal static partial class AniDbSeasonResolver
     /// Whether a name is asking for one season of a show rather than for the show itself, as a
     /// folder named "Show Season 2" is.
     /// </summary>
+    /// <remarks>
+    /// A season is also named by the word for it in another language, and by the name a final
+    /// season is given instead of a number: AniDB files fifteen entries as "Kanketsuhen" and
+    /// titles them "The Final Act" in English, InuYasha's eighth season among them. Such a name
+    /// read as the show's own took the show's first entry and left the season it asked for
+    /// unidentified.
+    /// </remarks>
     /// <param name="name">The name the series was searched under.</param>
     /// <returns><c>true</c> when the name ends in a season marker.</returns>
     public static bool NamesASeason(string? name)
@@ -1172,7 +1483,18 @@ internal static partial class AniDbSeasonResolver
     /// <summary>
     /// A season number, as it is written at the end of a folder name.
     /// </summary>
-    [GeneratedRegex(@"(\b(season|part|series|stage|cour)\s*\d+|\b\d+(st|nd|rd|th)\s+(season|part|series|stage|cour)|\b(final\s+season)|\s(II|III|IV|V|VI|VII|VIII|IX|X))\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    /// <remarks>
+    /// The Roman numeral is the one part matched as written, case and all, because a romanized
+    /// Japanese title ends in those same letters as words of its own: "Raise wa Tanin ga Ii"
+    /// ends in "Ii", which read case-insensitively is season two. A numeral is written in
+    /// capitals wherever it means a number, so requiring them costs nothing.
+    /// <para>
+    /// A lone V or X is left out altogether. Either can end a title as a letter - "Nazo no
+    /// Kanojo X", "After War Gundam X" - where no title reaches a fifth or tenth season
+    /// written as a numeral rather than a number.
+    /// </para>
+    /// </remarks>
+    [GeneratedRegex(@"(\b(season|staffel|part|series|stage|cour)\s*\d+|\b\d+(st|nd|rd|th)\s+(season|staffel|part|series|stage|cour)|\b\d+\.\s*(season|staffel|part|series|stage|cour)|\b(final\s+(season|act|chapter))|\bkanketsuhen|(?-i:\s(II|III|IV|VI|VII|VIII|IX)))\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SeasonMarkerRegex();
 
     /// <summary>
@@ -1181,4 +1503,11 @@ internal static partial class AniDbSeasonResolver
     /// </summary>
     [GeneratedRegex(@"^(?:(?:SEASON|PART|SERIES|STAGE|COUR)?(?:[2-9]|1[0-9])(?:ST|ND|RD|TH)?(?:SEASON|PART|SERIES|STAGE|COUR)?|II|III|IV|V|VI|VII|VIII|IX|X|(?:SECOND|THIRD|FOURTH|FIFTH|SIXTH|FINAL)(?:SEASON|PART|SERIES|STAGE|COUR)?)$", RegexOptions.CultureInvariant)]
     private static partial Regex SeasonSuffixRegex();
+
+    /// <summary>
+    /// A segment naming episodes its entry does not have.
+    /// </summary>
+    /// <param name="Segment">The segment.</param>
+    /// <param name="EpisodeCount">How many episodes AniDB records for the entry it names.</param>
+    private sealed record UnheldSegment(AniDbSeasonSegment Segment, int EpisodeCount);
 }

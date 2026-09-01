@@ -57,7 +57,6 @@ public class PluginConfiguration : BasePluginConfiguration
     public PluginConfiguration()
     {
         TitlePreference = TitlePreferenceType.Localized;
-        OriginalTitlePreference = TitlePreferenceType.JapaneseRomaji;
         IgnoreSeason = false;
         TitleSimilarityThreshold = 50;
         MaxGenres = 5;
@@ -74,11 +73,15 @@ public class PluginConfiguration : BasePluginConfiguration
         MinimumTagWeight = DefaultMinimumTagWeight;
         InfoboxTagsOnly = false;
         TagBlacklist = string.Empty;
+        UseAniBridgeMappings = true;
     }
 
+    /// <summary>
+    /// Gets or sets the language the displayed title is taken from. The original title is not
+    /// affected: it is the title in the language the anime was made in, and so always the
+    /// Japanese one.
+    /// </summary>
     public TitlePreferenceType TitlePreference { get; set; }
-
-    public TitlePreferenceType OriginalTitlePreference { get; set; }
 
     public bool IgnoreSeason { get; set; }
 
@@ -121,6 +124,15 @@ public class PluginConfiguration : BasePluginConfiguration
     /// filled from. With this off the season keeps the name Jellyfin gave it.
     /// </summary>
     public bool UseAniDbSeasonNames { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the AniBridge mappings are consulted before the
+    /// anime list. They place half again as many AniDB entries, state each placement's episode
+    /// ranges outright, and are the only source here that carries TMDB show ids. Turning them
+    /// off leaves the anime list to place everything, as it did before they were added, which is
+    /// worth doing only where they place a show wrongly.
+    /// </summary>
+    public bool UseAniBridgeMappings { get; set; }
 
     /// <summary>
     /// Gets or sets the shortest gap, in milliseconds, between two AniDB requests. Clamped to

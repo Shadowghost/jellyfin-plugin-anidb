@@ -367,44 +367,56 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     /// <returns>The AniDB id, or <c>null</c> when the show cannot be identified.</returns>
     private async Task<string?> Identify(SeriesInfo info, CancellationToken cancellationToken)
     {
-        // A TVDB id a provider ahead of this one has already settled on names the show
-        // outright, and the anime list records which AniDB entry that id is. It is tried
+        // A TVDB or TMDB id a provider ahead of this one has already settled on names the show
+        // outright, and the mapping sources record which AniDB entry that id is. It is tried
         // first because a name is the weaker evidence of the two: AniDB spells a great many
         // names differently from TVDB, and where two shows do share a name the id is the only
         // thing that tells them apart. A folder naming a season is left to the name match
         // below, because the id names the whole show and would answer with its first season.
-        var tvdbId = info.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tvdb));
-
         if (!AniDbSeasonResolver.NamesASeason(info.Name))
         {
-            var listed = await AniDbAnimeList.ResolveSeriesId(
+            var mapped = await AniDbMappings.ResolveSeriesId(
                 _appPaths,
-                tvdbId,
+                info.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tvdb)),
+                info.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tmdb)),
                 Logger ?? (ILogger)NullLogger.Instance,
                 cancellationToken).ConfigureAwait(false);
 
-            if (!string.IsNullOrEmpty(listed))
+            if (mapped != null)
             {
                 Logger?.LogInformation(
-                    "{SeriesName} is AniDB anime {AnimeId}, which the anime list files under TVDB series {TvdbId}",
+                    "{SeriesName} is AniDB anime {AnimeId}, which {Source} files under {Provider} series {ProviderId}",
                     info.Name,
-                    listed,
-                    tvdbId);
+                    mapped.AnimeId,
+                    mapped.Source,
+                    mapped.Provider,
+                    mapped.ProviderId);
 
-                return listed;
+                return mapped.AnimeId;
             }
         }
 
-        var matched = string.IsNullOrEmpty(info.Name)
+        // The folder is what the user named, and it still says which show this is where the name
+        // on the item no longer does.
+        var folderName = Path.GetFileName(info.Path?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var truncated = IsTruncation(info.Name, folderName);
+
+        if (truncated)
+        {
+            Logger?.LogInformation(
+                "{SeriesName} is what is left of the folder name {FolderName} once it was cut short, so the folder is searched instead. A name with no letters in it matches almost any anime, this search being a fuzzy one, and matching the wrong one would settle the show for good",
+                info.Name,
+                folderName);
+        }
+
+        var matched = string.IsNullOrEmpty(info.Name) || truncated
             ? string.Empty
             : await Equals_check.XmlFindId(info.Name, GetLookupYear(info), cancellationToken).ConfigureAwait(false);
 
         // The name searched above is the item's, which is whatever provider reached it first,
         // and a provider that matched the wrong show has already renamed it to that show. The
-        // folder is what the user named and still says which show this is, so it gets an
-        // attempt of its own, under the year written into it rather than the wrong show's.
-        var folderName = Path.GetFileName(info.Path?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-
+        // folder gets an attempt of its own, under the year written into it rather than the
+        // wrong show's.
         if (string.IsNullOrEmpty(matched)
             && !string.IsNullOrEmpty(folderName)
             && !string.Equals(folderName, info.Name, StringComparison.OrdinalIgnoreCase))
@@ -443,7 +455,7 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
         // it settles this for nothing, where each hop of the relation walk costs a request.
         if (!AniDbSeasonResolver.NamesASeason(searchedName))
         {
-            var listedFirst = await AniDbAnimeList.ResolveFirstSeason(
+            var listedFirst = await AniDbMappings.ResolveFirstSeason(
                 _appPaths,
                 matched,
                 Logger ?? (ILogger)NullLogger.Instance,
@@ -452,7 +464,7 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
             if (!string.IsNullOrEmpty(listedFirst))
             {
                 Logger?.LogInformation(
-                    "{SeriesName} matched AniDB anime {MatchedId}, which the anime list files as a later season. The show begins at anime {AnimeId}, which is used instead",
+                    "{SeriesName} matched AniDB anime {MatchedId}, which the mapping sources file as a later season. The show begins at anime {AnimeId}, which is used instead",
                     searchedName,
                     matched,
                     listedFirst);
@@ -515,16 +527,19 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
 
         await Offer(searchInfo.ProviderIds.GetValueOrDefault(ProviderNames.AniDb)).ConfigureAwait(false);
 
-        // The anime list is the one source here that answers with a certainty rather than a
-        // guess, so its answer goes first. It also settles the question the name cannot: it
-        // holds anime only, so a TVDB id it does not carry belongs to something that is not an
-        // anime - a live action adaptation sharing the show's name, most often - and a TVDB id
-        // it does carry names the AniDB entry outright.
-        await Offer(await AniDbAnimeList.ResolveSeriesId(
+        // The mapping sources are the ones here that answer with a certainty rather than a
+        // guess, so their answer goes first. They also settle the question the name cannot: they
+        // hold anime only, so an id they do not carry belongs to something that is not an
+        // anime - a live action adaptation sharing the show's name, most often - and an id they
+        // do carry names the AniDB entry outright.
+        var mapped = await AniDbMappings.ResolveSeriesId(
             _appPaths,
             searchInfo.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tvdb)),
+            searchInfo.ProviderIds.GetValueOrDefault(nameof(MetadataProvider.Tmdb)),
             Logger ?? (ILogger)NullLogger.Instance,
-            cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
+            cancellationToken).ConfigureAwait(false);
+
+        await Offer(mapped?.AnimeId).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(searchInfo.Name))
         {
@@ -1299,7 +1314,11 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
         }
 
         string? title = titles.Localize(Plugin.Instance.Configuration.TitlePreference, preferredMetadataLangauge)?.Name;
-        string? originalTitle = titles.Localize(Plugin.Instance.Configuration.OriginalTitlePreference, preferredMetadataLangauge)?.Name;
+
+        // The original title is the title in the language the anime was made in, so it is
+        // always the Japanese one, whatever language the displayed title is asked for. Where
+        // AniDB holds no Japanese title this falls back to the romaji main title.
+        string? originalTitle = titles.Localize(TitlePreferenceType.Japanese, preferredMetadataLangauge)?.Name;
 
         return (title, originalTitle);
     }
@@ -1381,6 +1400,33 @@ public partial class AniDbSeriesProvider : IRemoteMetadataProvider<Series, Serie
     /// <returns>The year, or <c>null</c> when nothing gives one.</returns>
     private static int? GetLookupYear(ItemLookupInfo info)
         => info.Year ?? info.PremiereDate?.Year;
+
+    /// <summary>
+    /// Whether the name on the item is the folder name cut short rather than a name of its own.
+    /// </summary>
+    /// <remarks>
+    /// A show whose name begins with a number and a dot arrives here named with just that
+    /// number: "2.43: Seiin High School Boys Volleyball Team" in a folder of that name reaches
+    /// this as "2". Whatever cut it is not this plugin - nothing here reads a name apart at a
+    /// dot - but searching what is left would match almost any anime, the search being fuzzy and
+    /// a single digit appearing in thousands of titles, and a match however wrong would keep the
+    /// folder from being tried at all. A name with no letter anywhere in it is the mark of such
+    /// a cut: a real title of that shape - "009-1", "001", "663114" - is its folder's name
+    /// whole rather than the start of it.
+    /// </remarks>
+    /// <param name="name">The name on the item.</param>
+    /// <param name="folderName">The name of the folder holding it.</param>
+    /// <returns><c>true</c> where the name is the folder name cut short.</returns>
+    private static bool IsTruncation(string? name, string? folderName)
+    {
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(folderName) || name.Any(char.IsLetter))
+        {
+            return false;
+        }
+
+        return folderName.Length > name.Length
+            && folderName.StartsWith(name, StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// The year a folder name carries, as "Ranma &#189; (1989)" does. It is what tells two

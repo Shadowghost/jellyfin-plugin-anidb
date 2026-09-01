@@ -59,4 +59,49 @@ public class AniDbStatus
     /// Gets or sets how many days the cached copy is used for before it is downloaded again.
     /// </summary>
     public int AnimeListMaxAgeDays { get; set; }
+
+    /// <summary>
+    /// Gets or sets when the cached copy of the AniBridge mappings was downloaded, or
+    /// <c>null</c> when none has been.
+    /// </summary>
+    public DateTime? AniBridgeCachedAtUtc { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many AniDB entries have been read from that copy. Zero until the
+    /// first season is looked up, which is when the mappings are first read.
+    /// </summary>
+    public int AniBridgeEntryCount { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many days the cached copy is used for before it is downloaded again.
+    /// </summary>
+    public int AniBridgeMaxAgeDays { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the AniBridge mappings are consulted at all.
+    /// </summary>
+    public bool AniBridgeEnabled { get; set; }
+
+    /// <summary>
+    /// Gets or sets where the mapping overrides are read from, whether or not a file is there.
+    /// Nothing downloads that file, so the page has to say where to put one.
+    /// </summary>
+    public string OverridesPath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets when the override file was last written, or <c>null</c> where there is no
+    /// such file, which is the ordinary state of an installation.
+    /// </summary>
+    public DateTime? OverridesWrittenAtUtc { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many AniDB entries have been read from it. Zero until the first season
+    /// is looked up, which is when the file is first read.
+    /// </summary>
+    public int OverridesEntryCount { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many films it identifies, which a file may state instead of any season.
+    /// </summary>
+    public int OverridesFilmCount { get; set; }
 }
