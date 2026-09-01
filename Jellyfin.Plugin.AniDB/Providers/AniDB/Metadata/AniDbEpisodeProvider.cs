@@ -664,7 +664,7 @@ public partial class AniDbEpisodeProvider(IServerConfigurationManager configurat
             }
         }
 
-        var title = titles.Localize(Configuration.TitlePreferenceType.Localized, preferredMetadataLanguage)?.Name;
+        var title = titles.Localize(Plugin.Instance.Configuration.TitlePreference, preferredMetadataLanguage)?.Name;
         if (!string.IsNullOrEmpty(title))
         {
             episode.Name = Plugin.Instance.Configuration.AniDbReplaceGraves
